@@ -14,30 +14,52 @@ exec < /dev/tty
 clear
 echo "========================================================="
 echo "   Arch Linux Minimal Homelab & Network Gateway Setup    "
-echo "        (AdGuard Home, Mihomo, Vaultwarden, Samba)       "
+echo "      (Mihomo Native Gateway, Vaultwarden, Samba)        "
 echo "========================================================="
 echo ""
+
+APP_DIR="/opt/homelab"
+ENV_FILE="${APP_DIR}/.env"
+
+# Подгрузка сохраненных значений, если файл существует
+if [ -f "${ENV_FILE}" ]; then
+    echo "[*] Обнаружен файл сохраненной конфигурации (${ENV_FILE})."
+    echo "    Нажмите Enter, чтобы сохранить текущее значение, или введите новое."
+    echo ""
+    # shellcheck source=/dev/null
+    source "${ENV_FILE}"
+fi
 
 # 1. Автоопределение локального IP
 AUTO_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
 AUTO_IP=${AUTO_IP:-192.168.1.1}
 DEFAULT_IFACE=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}')
 
-read -rp "[?] Локальный IP сервера [$AUTO_IP] (Enter для подтверждения): " INPUT_IP
-LOCAL_IP=${INPUT_IP:-$AUTO_IP}
+SAVED_LOCAL_IP=${SAVED_LOCAL_IP:-$AUTO_IP}
+read -rp "[?] Локальный IP сервера [${SAVED_LOCAL_IP}]: " INPUT_IP
+LOCAL_IP=${INPUT_IP:-$SAVED_LOCAL_IP}
 echo "[+] Используется IP: ${LOCAL_IP}"
 echo ""
 
 # 2. Интерактивный ввод параметров домена и подписки
 echo "--- Настройка внешнего доступа (DuckDNS) ---"
-read -rp "[?] Поддомен DuckDNS (например, myserver для myserver.duckdns.org): " DUCKDNS_NAME
+read -rp "[?] Поддомен DuckDNS [${SAVED_DUCKDNS_NAME}]: " INPUT_DUCKDNS_NAME
+DUCKDNS_NAME=${INPUT_DUCKDNS_NAME:-$SAVED_DUCKDNS_NAME}
 while [ -z "$DUCKDNS_NAME" ]; do
     echo "[-] Ошибка: имя поддомена не может быть пустым!"
     read -rp "[?] Поддомен DuckDNS: " DUCKDNS_NAME
 done
 DUCKDNS_DOMAIN="${DUCKDNS_NAME}.duckdns.org"
 
-read -rp "[?] Токен DuckDNS (токен из личного кабинета): " DUCKDNS_TOKEN
+# Маскирование токена при выводе подсказки
+if [ -n "$SAVED_DUCKDNS_TOKEN" ]; then
+    MASKED_TOKEN="${SAVED_DUCKDNS_TOKEN:0:4}...${SAVED_DUCKDNS_TOKEN: -4}"
+    TOKEN_PROMPT="[?] Токен DuckDNS [${MASKED_TOKEN}]: "
+else
+    TOKEN_PROMPT="[?] Токен DuckDNS: "
+fi
+read -rp "${TOKEN_PROMPT}" INPUT_DUCKDNS_TOKEN
+DUCKDNS_TOKEN=${INPUT_DUCKDNS_TOKEN:-$SAVED_DUCKDNS_TOKEN}
 while [ -z "$DUCKDNS_TOKEN" ]; do
     echo "[-] Ошибка: токен DuckDNS обязателен для получения HTTPS сертификата!"
     read -rp "[?] Токен DuckDNS: " DUCKDNS_TOKEN
@@ -45,7 +67,13 @@ done
 echo ""
 
 echo "--- Настройка прокси (Mihomo) ---"
-read -rp "[?] Ссылка на Clash-подписку (URL): " SUB_URL
+if [ -n "$SAVED_SUB_URL" ]; then
+    SUB_PROMPT="[?] Ссылка на Clash-подписку (URL) [сохранена, Enter - оставить]: "
+else
+    SUB_PROMPT="[?] Ссылка на Clash-подписку (URL): "
+fi
+read -rp "${SUB_PROMPT}" INPUT_SUB_URL
+SUB_URL=${INPUT_SUB_URL:-$SAVED_SUB_URL}
 while [ -z "$SUB_URL" ]; do
     echo "[-] Ошибка: ссылка на подписку обязательна!"
     read -rp "[?] Ссылка на Clash-подписку (URL): " SUB_URL
@@ -53,37 +81,45 @@ done
 echo ""
 
 echo "--- Настройка учетных записей и безопасности ---"
-read -rp "[?] Имя пользователя системы и Samba [neko]: " INPUT_USER
-TARGET_USER=${INPUT_USER:-neko}
+SAVED_TARGET_USER=${SAVED_TARGET_USER:-neko}
+read -rp "[?] Имя пользователя системы и Samba [${SAVED_TARGET_USER}]: " INPUT_USER
+TARGET_USER=${INPUT_USER:-$SAVED_TARGET_USER}
 
-read -rp "[?] Пароль для сетевой папки Samba (${TARGET_USER}) [ChangeMe123]: " INPUT_SAMBA_PASS
-SAMBA_PASS=${INPUT_SAMBA_PASS:-ChangeMe123}
+SAVED_SAMBA_PASS=${SAVED_SAMBA_PASS:-ChangeMe123}
+read -rp "[?] Пароль для сетевой папки Samba (${TARGET_USER}) [${SAVED_SAMBA_PASS}]: " INPUT_SAMBA_PASS
+SAMBA_PASS=${INPUT_SAMBA_PASS:-$SAVED_SAMBA_PASS}
 
-read -rsp "[?] Пароль для AdGuard Home (admin) [admin123]: " INPUT_AGH_PASS
-echo ""
-AGH_PASS=${INPUT_AGH_PASS:-admin123}
-
-read -rp "[?] Секретный ключ (secret) для Mihomo / MetaCubeXD [123456]: " INPUT_MIHOMO_SECRET
-MIHOMO_SECRET=${INPUT_MIHOMO_SECRET:-123456}
+SAVED_MIHOMO_SECRET=${SAVED_MIHOMO_SECRET:-123456}
+read -rp "[?] Секретный ключ (secret) для Mihomo / MetaCubeXD [${SAVED_MIHOMO_SECRET}]: " INPUT_MIHOMO_SECRET
+MIHOMO_SECRET=${INPUT_MIHOMO_SECRET:-$SAVED_MIHOMO_SECRET}
 
 SAVE_DIR="/home/${TARGET_USER}/save"
-APP_DIR="/opt/homelab"
 
+# Сохранение учетных данных в защищенный .env файл
+mkdir -p "${APP_DIR}"
+cat <<EOF > "${ENV_FILE}"
+SAVED_LOCAL_IP="${LOCAL_IP}"
+SAVED_DUCKDNS_NAME="${DUCKDNS_NAME}"
+SAVED_DUCKDNS_TOKEN="${DUCKDNS_TOKEN}"
+SAVED_SUB_URL="${SUB_URL}"
+SAVED_TARGET_USER="${TARGET_USER}"
+SAVED_SAMBA_PASS="${SAMBA_PASS}"
+SAVED_MIHOMO_SECRET="${MIHOMO_SECRET}"
+EOF
+chmod 600 "${ENV_FILE}"
+echo "[+] Конфигурация сохранена в ${ENV_FILE} (права 600)."
 echo ""
+
 echo "[+] Все параметры получены. Начинаем установку..."
 sleep 2
 
 # ==========================================
 # 1. ПОДГОТОВКА СИСТЕМЫ И ПАКЕТОВ
 # ==========================================
-echo "=== [1/8] Установка пакетов и тюнинг сети Arch Linux ==="
-pacman -Syu --noconfirm --needed docker docker-compose curl jq ca-certificates iptables-nft apache unzip
+echo "=== [1/7] Установка пакетов и тюнинг сети Arch Linux ==="
+pacman -Syu --noconfirm --needed docker docker-compose curl jq ca-certificates iptables-nft unzip
 
-# Генерация bcrypt хеша пароля для AdGuard Home
-echo "[+] Хеширование пароля AdGuard Home..."
-AGH_HASH=$(htpasswd -B -C 10 -n -b admin "${AGH_PASS}" | cut -d: -f2)
-
-# Освобождаем 53 порт от systemd-resolved
+# Освобождаем 53 порт от systemd-resolved для чистоты
 mkdir -p /etc/systemd/resolved.conf.d/
 cat <<EOF > /etc/systemd/resolved.conf.d/disable-stub.conf
 [Resolve]
@@ -91,7 +127,7 @@ DNSStubListener=no
 EOF
 systemctl restart systemd-resolved || true
 
-# Безопасная страховка локального resolv.conf
+# Безопасная страховка локального resolv.conf хоста
 if [ -f /run/systemd/resolve/resolv.conf ]; then
     ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 else
@@ -121,7 +157,7 @@ fi
 # ==========================================
 # 2. ПОЛЬЗОВАТЕЛИ И ДИРЕКТОРИИ
 # ==========================================
-echo "=== [2/8] Создание каталогов и пользователей ==="
+echo "=== [2/7] Создание каталогов и пользователей ==="
 id -u "${TARGET_USER}" &>/dev/null || useradd -m -s /bin/bash "${TARGET_USER}"
 usermod -aG docker "${TARGET_USER}" || true
 
@@ -131,7 +167,6 @@ USER_GID=$(id -g "${TARGET_USER}")
 mkdir -p "${SAVE_DIR}"
 mkdir -p "${APP_DIR}/caddy/data" "${APP_DIR}/caddy/config"
 mkdir -p "${APP_DIR}/mihomo/ui"
-mkdir -p "${APP_DIR}/adguard/work" "${APP_DIR}/adguard/conf"
 mkdir -p "${APP_DIR}/vaultwarden"
 
 chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}"
@@ -140,7 +175,7 @@ chmod 770 "${SAVE_DIR}"
 # ==========================================
 # 3. СКАЧИВАНИЕ И ПАТЧ METACUBEXD UI
 # ==========================================
-echo "=== [3/8] Развертывание и патч веб-панели MetaCubeXD ==="
+echo "=== [3/7] Развертывание и патч веб-панели MetaCubeXD ==="
 curl -sL "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip" -o /tmp/metacubexd.zip
 mkdir -p /tmp/metacubexd-extract
 unzip -qo /tmp/metacubexd.zip -d /tmp/metacubexd-extract
@@ -154,7 +189,7 @@ find "${APP_DIR}/mihomo/ui" -type f \( -name "*.js" -o -name "*.html" \) -exec s
 # ==========================================
 # 4. НАСТРОЙКА DUCKDNS DDNS ТАЙМЕРА
 # ==========================================
-echo "=== [4/8] Настройка фонового сервиса обновления DuckDNS ==="
+echo "=== [4/7] Настройка фонового сервиса обновления DuckDNS ==="
 cat <<EOF > /etc/systemd/system/duckdns.service
 [Unit]
 Description=DuckDNS DDNS Updater
@@ -182,264 +217,9 @@ systemctl daemon-reload
 systemctl enable --now duckdns.timer
 
 # ==========================================
-# 5. КОНФИГУРАЦИЯ ADGUARD HOME
+# 5. КОНФИГУРАЦИЯ MIHOMO (С DNS REWRITE И 53 ПОРТОМ)
 # ==========================================
-echo "=== [5/8] Генерация конфигурации AdGuardHome.yaml ==="
-cat << 'EOF' > "${APP_DIR}/adguard/conf/AdGuardHome.yaml.template"
-http:
-  pprof:
-    port: 6060
-    enabled: false
-  doh:
-    routes:
-      - GET /dns-query
-      - POST /dns-query
-      - GET /dns-query/{ClientID}
-      - POST /dns-query/{ClientID}
-    insecure_enabled: false
-  address: 0.0.0.0:8083
-  session_ttl: 30d
-users:
-  - name: admin
-    password: __AGH_HASH__
-auth_attempts: 5
-block_auth_min: 15
-http_proxy: ""
-language: "ru"
-theme: auto
-dns:
-  bind_hosts:
-    - 0.0.0.0
-  port: 53
-  anonymize_client_ip: false
-  ratelimit: 20
-  ratelimit_subnet_len_ipv4: 24
-  ratelimit_subnet_len_ipv6: 56
-  ratelimit_whitelist: []
-  refuse_any: true
-  upstream_dns:
-    - 127.0.0.1:1053
-    - https://dns10.quad9.net/dns-query
-    - quic://dns.adguard-dns.com
-    - https://cloudflare-dns.com/dns-query
-    - https://dns.google/dns-query
-    - https://common.dot.dns.yandex.net/dns-query
-  upstream_dns_file: ""
-  bootstrap_dns:
-    - 9.9.9.10
-    - 149.112.112.10
-    - 2620:fe::10
-    - 2620:fe::fe:10
-  fallback_dns: []
-  upstream_mode: load_balance
-  fastest_timeout: 1s
-  allowed_clients: []
-  disallowed_clients: []
-  blocked_hosts:
-    - version.bind
-    - id.server
-    - hostname.bind
-  trusted_proxies:
-    - 127.0.0.0/8
-    - ::1/128
-  cache_enabled: true
-  cache_size: 4194304
-  cache_ttl_min: 0
-  cache_ttl_max: 0
-  cache_optimistic: false
-  cache_optimistic_answer_ttl: 30s
-  cache_optimistic_max_age: 12h
-  bogus_nxdomain: []
-  aaaa_disabled: false
-  enable_dnssec: true
-  edns_client_subnet:
-    custom_ip: ""
-    enabled: false
-    use_custom: false
-  max_goroutines: 300
-  handle_ddr: true
-  ipset: []
-  ipset_file: ""
-  bootstrap_prefer_ipv6: false
-  upstream_timeout: 10s
-  private_networks: []
-  use_private_ptr_resolvers: false
-  local_ptr_upstreams: []
-  use_dns64: false
-  dns64_prefixes: []
-  serve_http3: false
-  use_http3_upstreams: false
-  serve_plain_dns: true
-  hostsfile_enabled: true
-  pending_requests:
-    enabled: true
-tls:
-  enabled: false
-  server_name: ""
-  force_https: false
-  port_https: 443
-  port_dns_over_tls: 853
-  port_dns_over_quic: 853
-  port_dnscrypt: 0
-  dnscrypt_config_file: ""
-  certificate_chain: ""
-  private_key: ""
-  certificate_path: ""
-  private_key_path: ""
-  strict_sni_check: false
-querylog:
-  dir_path: ""
-  ignored: []
-  interval: 90d
-  size_memory: 1000
-  enabled: true
-  ignored_enabled: false
-  file_enabled: true
-statistics:
-  dir_path: ""
-  ignored: []
-  interval: 1d
-  enabled: true
-  ignored_enabled: false
-filters:
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
-    name: AdGuard DNS filter
-    id: 1
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
-    name: AdAway Default Blocklist
-    id: 2
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt
-    name: 1Hosts (Lite)
-    id: 1789156606
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_34.txt
-    name: HaGeZi's Normal Blocklist
-    id: 1789156608
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt
-    name: HaGeZi's Pro Blocklist
-    id: 1789156609
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_49.txt
-    name: HaGeZi's Ultimate Blocklist
-    id: 1789156610
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_59.txt
-    name: AdGuard DNS Popup Hosts filter
-    id: 1789156611
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_53.txt
-    name: AWAvenue Ads Rule
-    id: 1789156612
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_4.txt
-    name: Dan Pollock's List
-    id: 1789156613
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_51.txt
-    name: HaGeZi's Pro++ Blocklist
-    id: 1789156614
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_5.txt
-    name: OISD Blocklist Small
-    id: 1789156615
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_33.txt
-    name: Steven Black's List
-    id: 1789156616
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_69.txt
-    name: ShadowWhisperer Tracking List
-    id: 1789156617
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_3.txt
-    name: Peter Lowe's Blocklist
-    id: 1789156618
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt
-    name: OISD Blocklist Big
-    id: 1789156619
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_70.txt
-    name: 1Hosts (Xtra)
-    id: 1789156620
-whitelist_filters: []
-user_rules:
-  - '@@||www.whoer.net^$important'
-  - '@@||www.aniliberty.top^$important'
-  - '@@||whoer.net^$important'
-  - '@@||aniliberty.top^$important'
-dhcp:
-  enabled: false
-filtering:
-  blocking_ipv4: ""
-  blocking_ipv6: ""
-  blocked_services:
-    schedule:
-      time_zone: UTC
-    ids: []
-  protection_disabled_until: null
-  safe_search:
-    enabled: false
-  blocking_mode: default
-  parental_block_host: family-block.dns.adguard.com
-  safebrowsing_block_host: standard-block.dns.adguard.com
-  rewrites:
-    - domain: whoer.net
-      answer: 192.168.1.1
-      enabled: true
-    - domain: __DUCKDNS_DOMAIN__
-      answer: __LOCAL_IP__
-      enabled: true
-  max_http_size: 256MB
-  safebrowsing_cache_size: 1048576
-  safesearch_cache_size: 1048576
-  parental_cache_size: 1048576
-  cache_time: 30
-  filters_update_interval: 24
-  blocked_response_ttl: 10
-  filtering_enabled: false
-  rewrites_enabled: true
-  parental_enabled: false
-  safebrowsing_enabled: false
-  protection_enabled: true
-clients:
-  runtime_sources:
-    whois: true
-    arp: true
-    rdns: true
-    dhcp: true
-    hosts: true
-  persistent: []
-log:
-  enabled: true
-  file: ""
-  max_backups: 0
-  max_size: 100
-  max_age: 3
-  compress: false
-  local_time: false
-  verbose: false
-os:
-  group: ""
-  user: ""
-  rlimit_nofile: 0
-schema_version: 34
-EOF
-
-sed -e "s|__DUCKDNS_DOMAIN__|${DUCKDNS_DOMAIN}|g" \
-    -e "s|__LOCAL_IP__|${LOCAL_IP}|g" \
-    -e "s|__AGH_HASH__|${AGH_HASH}|g" \
-    "${APP_DIR}/adguard/conf/AdGuardHome.yaml.template" > "${APP_DIR}/adguard/conf/AdGuardHome.yaml"
-rm -f "${APP_DIR}/adguard/conf/AdGuardHome.yaml.template"
-
-# ==========================================
-# 6. КОНФИГУРАЦИЯ MIHOMO
-# ==========================================
-echo "=== [6/8] Создание конфигурации Mihomo ==="
+echo "=== [5/7] Создание конфигурации Mihomo ==="
 cat <<EOF > "${APP_DIR}/mihomo/config.yaml"
 mixed-port: 7890
 allow-lan: true
@@ -450,18 +230,35 @@ secret: "${MIHOMO_SECRET}"
 external-controller: 0.0.0.0:9090
 external-ui: ui
 
+hosts:
+  '${DUCKDNS_DOMAIN}': '${LOCAL_IP}'
+
 dns:
   enable: true
-  listen: 0.0.0.0:1053
+  listen: 0.0.0.0:53
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
     - "*.duckdns.org"
     - "${DUCKDNS_DOMAIN}"
-    - "whoer.net"
+    - "*.lan"
+    - "*.local"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+  default-nameserver:
+    - 77.88.8.8
+    - 1.1.1.1
   nameserver:
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
     - 1.1.1.1
     - 8.8.8.8
+  proxy-server-nameserver:
+    - 77.88.8.8
+    - 1.1.1.1
+  direct-nameserver:
+    - 77.88.8.8
+    - 77.88.8.1
 
 tun:
   enable: true
@@ -495,14 +292,15 @@ proxy-groups:
 rules:
   - DOMAIN,${DUCKDNS_DOMAIN},DIRECT
   - DOMAIN-SUFFIX,duckdns.org,DIRECT
+  - GEOIP,private,DIRECT,no-resolve
   - GEOIP,lan,DIRECT,no-resolve
   - MATCH,PROXY
 EOF
 
 # ==========================================
-# 7. CADDYFILE & DOCKER COMPOSE
+# 6. CADDYFILE & DOCKER COMPOSE
 # ==========================================
-echo "=== [7/8] Создание Caddyfile и docker-compose.yml ==="
+echo "=== [6/7] Создание Caddyfile и docker-compose.yml ==="
 cat <<EOF > "${APP_DIR}/caddy/Caddyfile"
 ${DUCKDNS_DOMAIN} {
     tls {
@@ -527,15 +325,6 @@ services:
       - USERID=${USER_UID}
       - GROUPID=${USER_GID}
     command: -u "${TARGET_USER};${SAMBA_PASS}" -s "save;/mount/save;yes;no;no;${TARGET_USER}"
-
-  adguard:
-    image: adguard/adguardhome:latest
-    container_name: adguardhome
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./adguard/work:/opt/adguardhome/work
-      - ./adguard/conf:/opt/adguardhome/conf
 
   mihomo:
     image: metacubex/mihomo:latest
@@ -569,6 +358,17 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile
       - ./caddy/data:/data
       - ./caddy/config:/config
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=86400
+      - WATCHTOWER_INCLUDE_RESTARTING=true
 EOF
 
 # Создание сервиса автозапуска при загрузке
@@ -596,9 +396,9 @@ systemctl enable --now docker
 systemctl enable homelab.service
 
 # ==========================================
-# 8. ЗАПУСК ВСЕХ СЕРВИСОВ
+# 7. ЗАПУСК ВСЕХ СЕРВИСОВ
 # ==========================================
-echo "=== [8/8] Загрузка образов и старт стека ==="
+echo "=== [7/7] Загрузка образов и старт стека ==="
 cd "${APP_DIR}"
 docker compose pull
 docker compose up -d
@@ -608,13 +408,12 @@ echo "========================================================="
 echo "   Установка и настройка шлюза успешно завершена!       "
 echo "========================================================="
 echo ""
-echo "  [+] Панель MetaCubeXD (вход в 1 клик без ввода IP):"
+echo "  [+] Панель MetaCubeXD:"
 echo "      http://${LOCAL_IP}:9090/ui/#/?hostname=${LOCAL_IP}&port=9090&secret=${MIHOMO_SECRET}"
 echo ""
-echo "  [+] AdGuard Home:"
-echo "      Адрес:  http://${LOCAL_IP}:8083"
-echo "      Логин:  admin"
-echo "      Пароль: ${AGH_PASS}"
+echo "  [+] DNS & Прокси-шлюз (Mihomo):"
+echo "      DNS-сервер:     ${LOCAL_IP}:53"
+echo "      DNS Rewrite:    ${DUCKDNS_DOMAIN} -> ${LOCAL_IP}"
 echo ""
 echo "  [+] Менеджер паролей Vaultwarden:"
 echo "      Адрес:  https://${DUCKDNS_DOMAIN}"
@@ -623,6 +422,4 @@ echo "  [+] Сетевая папка Samba:"
 echo "      Путь:   \\\\${LOCAL_IP}\\save"
 echo "      Логин:  ${TARGET_USER}"
 echo "      Пароль: ${SAMBA_PASS}"
-echo ""
-echo "  [+] DNS-сервер для локальной сети: ${LOCAL_IP}"
 echo "========================================================="
