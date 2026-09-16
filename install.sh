@@ -394,7 +394,7 @@ EOF
     echo ""
     echo "--- Настройка SSL ---"
     echo "  1) Caddy Internal (*.local без регистрации в интернете)"
-    echo "  2) DuckDNS + Let's Encrypt (валидный публичный SSL)"
+    echo "  2) DuckDNS + Let's Encrypt (валидный публичный Wildcard SSL)"
     read -rp "[?] Выберите режим SSL [1/2] [${SAVED_SSL_MODE:-1}]: " SSL_MODE
     SSL_MODE=${SSL_MODE:-${SAVED_SSL_MODE:-1}}
 
@@ -500,7 +500,7 @@ else
         apache2-utils curl jq unzip tar iptables sqlite3 python3
 fi
 
-# Настройка быстрых зеркал Docker Registry для защиты от сетевых блокировок
+# Зеркала Docker Registry от таймаутов загрузки
 mkdir -p /etc/docker
 cat <<EOF > /etc/docker/daemon.json
 {
@@ -546,7 +546,6 @@ net.ipv6.conf.all.forwarding = 1
 EOF
     sysctl --system >/dev/null 2>&1
 
-    # Включаем транзит трафика (FORWARD) и NAT для шлюза
     iptables -P FORWARD ACCEPT 2>/dev/null || true
     if [ -n "${DEFAULT_IFACE}" ]; then
         iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || \
@@ -836,38 +835,82 @@ fi
 # ==========================================
 echo "=== [5/6] Генерация Caddyfile и docker-compose.yml ==="
 
-if [ "$SSL_MODE" = "2" ]; then
-    TLS_CONFIG="tls {
-        dns duckdns ${DUCKDNS_TOKEN}
-    }"
-else
-    TLS_CONFIG="tls internal"
-fi
-
 cat <<EOF > "${APP_DIR}/caddy/Caddyfile"
 {
     admin off
 }
 EOF
 
-if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+if [ "$SSL_MODE" = "2" ]; then
+    # Wildcard-режим для DuckDNS (один сертификат сразу для всех сервисов без конфликта TXT)
     cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+*.${BASE_DOMAIN} {
+    tls {
+        dns duckdns ${DUCKDNS_TOKEN}
+    }
+EOF
+
+    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    @vault host ${VAULT_DOMAIN}
+    handle @vault {
+        reverse_proxy vaultwarden:80
+    }
+EOF
+    fi
+
+    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    @adguard host ${ADGUARD_DOMAIN}
+    handle @adguard {
+        reverse_proxy host.docker.internal:8083
+    }
+
+    @proxy host ${PROXY_DOMAIN}
+    handle @proxy {
+        handle_path /api/* {
+            reverse_proxy host.docker.internal:9090
+        }
+        handle {
+            root * /srv/mihomo-ui
+            file_server
+            try_files {path} {path}/ /index.html
+        }
+    }
+EOF
+    fi
+
+    if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    @torrent host ${TORRENT_DOMAIN}
+    handle @torrent {
+        reverse_proxy qbittorrent:8080
+    }
+EOF
+    fi
+
+    echo "}" >> "${APP_DIR}/caddy/Caddyfile"
+
+else
+    # Режим внутреннего центра сертификации (*.local)
+    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
 ${VAULT_DOMAIN} {
-    ${TLS_CONFIG}
+    tls internal
     reverse_proxy vaultwarden:80
 }
 EOF
-fi
+    fi
 
-if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-    cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
 ${ADGUARD_DOMAIN} {
-    ${TLS_CONFIG}
+    tls internal
     reverse_proxy host.docker.internal:8083
 }
 
 ${PROXY_DOMAIN} {
-    ${TLS_CONFIG}
+    tls internal
 
     handle_path /api/* {
         reverse_proxy host.docker.internal:9090
@@ -880,15 +923,16 @@ ${PROXY_DOMAIN} {
     }
 }
 EOF
-fi
+    fi
 
-if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
-    cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
 ${TORRENT_DOMAIN} {
-    ${TLS_CONFIG}
+    tls internal
     reverse_proxy qbittorrent:8080
 }
 EOF
+    fi
 fi
 
 cat <<EOF > "${APP_DIR}/docker-compose.yml"
