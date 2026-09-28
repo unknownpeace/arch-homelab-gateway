@@ -58,7 +58,6 @@ fi
 sync_system_time() {
     echo "[*] Проверка и синхронизация системного времени..."
 
-    # 1. Первичная экспресс-коррекция по HTTP (без TLS, чтобы не блокироваться ошибками сертификатов)
     local HTTP_DATE=""
     if command -v curl >/dev/null 2>&1; then
         HTTP_DATE=$(curl -sI -m 4 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null | grep -i '^date:' | head -n1 | cut -d' ' -f2- || true)
@@ -73,7 +72,6 @@ sync_system_time() {
         fi
     fi
 
-    # 2. Настройка и запуск службы времени systemd
     if command -v timedatectl >/dev/null 2>&1; then
         timedatectl set-ntp true 2>/dev/null || true
     fi
@@ -84,7 +82,6 @@ sync_system_time() {
         systemctl restart systemd-timesyncd 2>/dev/null || true
     fi
 
-    # 3. Ожидание фиксации NTP (до 5 секунд)
     local SYNCED=false
     for _ in {1..5}; do
         if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
@@ -127,7 +124,8 @@ if [ "${DISTRO_FAMILY}" = "arch" ]; then
         sqlite \
         docker \
         docker-compose \
-        argon2
+        argon2 \
+        iputils
 elif [ "${DISTRO_FAMILY}" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -o Acquire::Check-Valid-Until=false -y || apt-get update -y
@@ -148,7 +146,8 @@ elif [ "${DISTRO_FAMILY}" = "debian" ]; then
         unzip \
         tar \
         sqlite3 \
-        argon2
+        argon2 \
+        iputils-ping
 
     sync_system_time
 
@@ -200,6 +199,15 @@ DEFAULT_IFACE="${PHYS_IFACE:-enp0s3}"
 LOCAL_IP=$(ip -o -4 addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
 LOCAL_IP=${LOCAL_IP:-$(hostname -I | awk '{print $1}')}
 
+# Умное определение реального физического шлюза (роутера)
+ROUTER_GATEWAY=$(ip route show default dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $3}' | head -n1 || true)
+if [ -z "${ROUTER_GATEWAY}" ] || [ "${ROUTER_GATEWAY}" = "${LOCAL_IP}" ]; then
+    ROUTER_GATEWAY=$(ip neigh show dev "${DEFAULT_IFACE}" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "${LOCAL_IP}" | head -n1 || true)
+fi
+if [ -z "${ROUTER_GATEWAY}" ]; then
+    ROUTER_GATEWAY=$(ip -o -4 addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sed 's/\.[0-9]*$/.1/' || echo "192.168.1.1")
+fi
+
 RAW_SUBNET=$(ip -o -f inet addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $4}' | head -n1)
 if [ -n "${RAW_SUBNET}" ]; then
     LAN_SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('${RAW_SUBNET}', strict=False))" 2>/dev/null || echo "${RAW_SUBNET}")
@@ -213,9 +221,10 @@ id -u "${TARGET_USER}" &>/dev/null || useradd -m -s /bin/bash "${TARGET_USER}"
 USER_UID=$(id -u "${TARGET_USER}")
 USER_GID=$(id -g "${TARGET_USER}")
 
-echo "[+] Параметры определены автоматически:"
+echo "[+] Параметры сети определены:"
 echo "    • Дистрибутив:      ${PRETTY_NAME:-Linux}"
 echo "    • IP сервера:       ${LOCAL_IP}"
+echo "    • Шлюз роутера:     ${ROUTER_GATEWAY}"
 echo "    • LAN интерфейс:    ${DEFAULT_IFACE}"
 echo "    • Подсеть сети:     ${LAN_SUBNET}"
 echo "    • Пользователь:     ${TARGET_USER} (UID: ${USER_UID})"
@@ -281,6 +290,7 @@ if [ "$INSTALL_MODE" = "3" ]; then
         echo "[*] Очистка служебных папок..."
         rm -rf "${APP_DIR}/adguard" "${APP_DIR}/mihomo" "${APP_DIR}/caddy" "${APP_DIR}/qbittorrent" "${APP_DIR}/vaultwarden" "${ENV_FILE}"
     fi
+    systemctl disable --now network-gateway-watchdog.timer 2>/dev/null || true
     echo "[+] Сброс завершен. Запустите скрипт заново."
     exit 0
 fi
@@ -620,6 +630,7 @@ echo ""
 mkdir -p "${APP_DIR}"
 cat <<EOF > "${ENV_FILE}"
 SAVED_LOCAL_IP="${LOCAL_IP}"
+SAVED_ROUTER_GATEWAY="${ROUTER_GATEWAY}"
 SAVED_LAN_SUBNET="${LAN_SUBNET}"
 SAVED_ENABLE_GATEWAY="${ENABLE_GATEWAY}"
 SAVED_ENABLE_VAULT="${ENABLE_VAULT}"
@@ -687,6 +698,9 @@ if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
 fi
 
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+    echo "[*] Настройка маршрутизации и защиты от сетевых петель..."
+    
+    # Отключаем systemd-resolved DNSStubListener, чтобы порт 53 был свободен для AdGuard
     if systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]; then
         mkdir -p /etc/systemd/resolved.conf.d/
         cat <<EOF > /etc/systemd/resolved.conf.d/disable-stub.conf
@@ -696,11 +710,14 @@ EOF
         systemctl restart systemd-resolved || true
     fi
 
-    if [ -f /run/systemd/resolve/resolv.conf ]; then
-        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
-    else
-        echo -e "nameserver 1.1.1.1\nnameserver 8.8.8.8" > /etc/resolv.conf
-    fi
+    # Изолируем DNS самого сервера от DHCP роутера и AdGuard (предотвращение DNS-петли)
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    rm -f /etc/resolv.conf
+    cat <<EOF > /etc/resolv.conf
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+    chattr +i /etc/resolv.conf 2>/dev/null || true
 
     cat <<EOF > /etc/sysctl.d/99-gateway.conf
 net.ipv4.ip_forward = 1
@@ -713,6 +730,74 @@ EOF
         iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || \
         iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE
     fi
+
+    # Создание сторожевого демона (Watchdog), гарантирующего привязку к физическому роутеру
+    cat << 'EOF' > /usr/local/bin/gateway-watchdog.sh
+#!/usr/bin/env bash
+set -e
+
+# Читаем сохраненные параметры если есть
+[ -f /opt/homelab/.env ] && source /opt/homelab/.env
+
+IFACE="${PHYS_IFACE:-}"
+[ -z "$IFACE" ] && IFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5}' | grep -vE '^(Meta|tun|docker|br-|veth)' | head -n1 || true)
+[ -z "$IFACE" ] && IFACE=$(ip -o link show up | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | head -n1 || true)
+
+[ -z "$IFACE" ] && exit 0
+
+SERVER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
+
+# 1. Пытаемся взять известный шлюз из сохраненных
+ROUTER_IP="${SAVED_ROUTER_GATEWAY:-}"
+
+# 2. Если неизвестен, определяем по соседям в ARP-таблице
+if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
+    ROUTER_IP=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "$SERVER_IP" | head -n1 || true)
+fi
+
+# 3. Если всё еще пуст — берем .1 подсети
+if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
+    ROUTER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sed 's/\.[0-9]*$/.1/' || true)
+fi
+
+if [ -n "$ROUTER_IP" ] && [ "$ROUTER_IP" != "$SERVER_IP" ]; then
+    # Проверяем, существует ли физический default route с высоким приоритетом
+    CURRENT_GW=$(ip route show default dev "$IFACE" 2>/dev/null | awk '{print $3}' | head -n1 || true)
+    
+    if [ "$CURRENT_GW" != "$ROUTER_IP" ]; then
+        echo "[Watchdog] Восстановление шлюза через физический роутер ${ROUTER_IP} на интерфейсе ${IFACE}"
+        ip route replace default via "$ROUTER_IP" dev "$IFACE" metric 50 2>/dev/null || true
+    fi
+fi
+EOF
+    chmod +x /usr/local/bin/gateway-watchdog.sh
+
+    cat <<EOF > /etc/systemd/system/network-gateway-watchdog.service
+[Unit]
+Description=Gateway Auto-Discovery and Recovery Watchdog
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gateway-watchdog.sh
+EOF
+
+    cat <<EOF > /etc/systemd/system/network-gateway-watchdog.timer
+[Unit]
+Description=Run Gateway Watchdog every 15 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now network-gateway-watchdog.timer
+    /usr/local/bin/gateway-watchdog.sh || true
 fi
 
 for DOMAIN in "${VAULT_DOMAIN}" "${ADGUARD_DOMAIN}" "${TORRENT_DOMAIN}" "${PROXY_DOMAIN}"; do
@@ -742,7 +827,6 @@ mkdir -p "${APP_DIR}/vaultwarden"
 mkdir -p "${APP_DIR}/qbittorrent/config/qBittorrent"
 mkdir -p "${APP_DIR}/qbittorrent/vuetorrent"
 
-# Отключаем Copy-on-Write (nodatacow) для торрентов и БД во избежание фрагментации на Btrfs
 chattr +C "${SAVE_DIR}/torrent" 2>/dev/null || true
 chattr +C "${APP_DIR}/vaultwarden" 2>/dev/null || true
 
@@ -912,10 +996,14 @@ tun:
   auto-detect-interface: true
   route-exclude-address:
     - "${LAN_SUBNET}"
+    - "${ROUTER_GATEWAY}/32"
+    - "${LOCAL_IP}/32"
     - "172.16.0.0/12"
     - "10.0.0.0/8"
 
 rules:
+  - IP-CIDR,${ROUTER_GATEWAY}/32,DIRECT,no-resolve
+  - IP-CIDR,${LOCAL_IP}/32,DIRECT,no-resolve
   - MATCH,DIRECT
 EOF
     else
@@ -956,6 +1044,8 @@ tun:
   auto-detect-interface: true
   route-exclude-address:
     - "${LAN_SUBNET}"
+    - "${ROUTER_GATEWAY}/32"
+    - "${LOCAL_IP}/32"
     - "172.16.0.0/12"
     - "10.0.0.0/8"
 
@@ -983,6 +1073,8 @@ proxy-groups:
     interval: 300
 
 rules:
+  - IP-CIDR,${ROUTER_GATEWAY}/32,DIRECT,no-resolve
+  - IP-CIDR,${LOCAL_IP}/32,DIRECT,no-resolve
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,duckdns.org,DIRECT
   - IP-CIDR,${LAN_SUBNET},DIRECT,no-resolve
@@ -1230,6 +1322,7 @@ ${STORAGE_DEP_LINE}
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
+ExecStartPre=/usr/local/bin/gateway-watchdog.sh
 ExecStartPre=/bin/sh -c 'iptables -P FORWARD ACCEPT'
 ExecStartPre=/bin/sh -c 'iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE'
 ExecStart=/bin/sh -c 'docker compose up -d'
