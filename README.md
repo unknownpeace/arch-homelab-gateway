@@ -29,7 +29,7 @@
 Выполните команду в терминале вашего Arch Linux:
 
 ```bash
-curl -fsSLO [https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/main/install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/main/install.sh) && sudo bash install.sh
+curl -fsSLO https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/main/install.sh && sudo bash install.sh
 ```
 
 > **Требования:**
