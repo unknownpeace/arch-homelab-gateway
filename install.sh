@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
     echo "[-] Скрипт должен быть запущен с правами root!"
@@ -11,8 +11,7 @@ exec < /dev/tty
 
 clear
 echo "========================================================="
-echo "   Universal Homelab & Gateway Quick Setup               "
-echo "   (Arch Linux & Debian 13 Trixie)                       "
+echo "   Homelab & Gateway Setup for Arch Linux                "
 echo "   (AdGuard, Mihomo TUN, Vaultwarden, qBit, Samba)       "
 echo "========================================================="
 echo ""
@@ -21,26 +20,23 @@ APP_DIR="/opt/homelab"
 ENV_FILE="${APP_DIR}/.env"
 
 # ==========================================
-# 0. ОПРЕДЕЛЕНИЕ ДИСТРИБУТИВА И ЗАГРУЗКА .ENV
+# 0. ПРОВЕРКА ДИСТРИБУТИВА И ЗАГРУЗКА .ENV
 # ==========================================
 if [ -f /etc/os-release ]; then
     # shellcheck source=/dev/null
     . /etc/os-release
-    OS_ID="${ID}"
+    OS_ID="${ID:-}"
     OS_ID_LIKE="${ID_LIKE:-}"
 else
     echo "[-] Не удалось определить дистрибутив Linux!"
     exit 1
 fi
 
-if [[ "${OS_ID}" =~ (arch|artix|endeavouros|manjaro) ]] || [[ "${OS_ID_LIKE}" =~ arch ]]; then
-    DISTRO_TYPE="arch"
-    echo "[+] Обнаружена система семейства Arch Linux"
-elif [[ "${OS_ID}" =~ (debian|ubuntu) ]] || [[ "${OS_ID_LIKE}" =~ debian ]]; then
-    DISTRO_TYPE="debian"
-    echo "[+] Обнаружена система семейства Debian"
+if [[ "${OS_ID}" =~ ^(arch|artix|endeavouros|manjaro)$ ]] || [[ "${OS_ID_LIKE}" =~ arch ]]; then
+    echo "[+] Обнаружена система семейства Arch Linux (${PRETTY_NAME:-Arch Linux})"
 else
-    echo "[-] Неподдерживаемый дистрибутив: ${OS_ID}. Скрипт рассчитан на Arch Linux и Debian 13."
+    echo "[-] Неподдерживаемый дистрибутив: ${OS_ID}."
+    echo "    Этот скрипт оптимизирован исключительно для Arch Linux."
     exit 1
 fi
 
@@ -53,14 +49,24 @@ fi
 # ==========================================
 # 1. ПЕРВИЧНАЯ ПОДГОТОВКА И ОПРЕДЕЛЕНИЕ СЕТИ
 # ==========================================
-echo "[*] Установка базовых диагностических утилит..."
-if [ "${DISTRO_TYPE}" = "arch" ]; then
-    pacman -Sy --noconfirm --needed python iproute2 cryptsetup exfatprogs ntfs-3g util-linux curl ca-certificates >/dev/null 2>&1 || true
-else
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq python3 iproute2 cryptsetup exfatprogs ntfs-3g util-linux curl ca-certificates gnupg >/dev/null 2>&1 || true
-fi
+echo "[*] Обновление базы пакетов и установка зависимостей..."
+pacman -Syu --noconfirm --needed \
+    python \
+    iproute2 \
+    cryptsetup \
+    exfatprogs \
+    ntfs-3g \
+    util-linux \
+    curl \
+    ca-certificates \
+    jq \
+    iptables-nft \
+    apache \
+    unzip \
+    tar \
+    sqlite \
+    docker \
+    docker-compose
 
 if command -v docker >/dev/null 2>&1; then
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^mihomo$"; then
@@ -90,11 +96,11 @@ USER_UID=$(id -u "${TARGET_USER}" 2>/dev/null || echo 1000)
 USER_GID=$(id -g "${TARGET_USER}" 2>/dev/null || echo 1000)
 
 echo "[+] Параметры определены автоматически:"
-echo "    • Платформа:        ${DISTRO_TYPE^^}"
+echo "    • Платформа:        ARCH LINUX"
 echo "    • IP сервера:       ${LOCAL_IP}"
-echo "    • LAN интерфейс:   ${DEFAULT_IFACE}"
-echo "    • Подсеть сети:    ${LAN_SUBNET}"
-echo "    • Пользователь:    ${TARGET_USER} (UID: ${USER_UID})"
+echo "    • LAN интерфейс:    ${DEFAULT_IFACE}"
+echo "    • Подсеть сети:     ${LAN_SUBNET}"
+echo "    • Пользователь:     ${TARGET_USER} (UID: ${USER_UID})"
 echo ""
 
 select_disk_device() {
@@ -134,13 +140,13 @@ echo "Выберите вариант развертывания:"
 echo "  1) Экспресс-установка (Всё включено, системный диск, *.local) [Enter]"
 echo "  2) Расширенная настройка (Выбор дисков, форматирование, LUKS2)"
 echo "  3) Начать сначала (Удалить контейнеры и сбросить конфиги без удаления образов)"
-read -rp "[?] Ваш выбор [1/2/3] [1]: " INSTALL_MODE
+read -rp "[?] Ваш выбор [1/2/3]: " INSTALL_MODE
 INSTALL_MODE=${INSTALL_MODE:-1}
 echo ""
 
 if [ "$INSTALL_MODE" = "3" ]; then
     echo "[!] ВНИМАНИЕ: Будут остановлены контейнеры и удалены служебные конфиги стека!"
-    echo "    Docker-образы и файлы в каталоге save затронуты не будут."
+    echo "    Docker-образы и файлы в каталоге данных затронуты не будут."
     read -rp "[?] Подтвердите сброс (введите 'yes' или 'YES'): " CONFIRM_RESET
     if [[ ! "${CONFIRM_RESET}" =~ ^[Yy][Ee][Ss]$ ]]; then
         echo "[-] Отмена операции."
@@ -151,7 +157,7 @@ if [ "$INSTALL_MODE" = "3" ]; then
     if [ -d "${APP_DIR}" ]; then
         (cd "${APP_DIR}" && docker compose down -v 2>/dev/null || true)
         echo "[*] Очистка служебных папок..."
-        rm -rf "${APP_DIR}/adguard" "${APP_DIR}/mihomo" "${APP_DIR}/caddy" "${APP_DIR}/qbittorrent" "${APP_DIR}/vaultwarden" "${APP_DIR}/bot" "${ENV_FILE}"
+        rm -rf "${APP_DIR}/adguard" "${APP_DIR}/mihomo" "${APP_DIR}/caddy" "${APP_DIR}/qbittorrent" "${APP_DIR}/vaultwarden" "${ENV_FILE}"
     fi
     echo "[+] Сброс завершен. Запустите скрипт заново."
     exit 0
@@ -164,6 +170,7 @@ STORAGE_DEP_LINE=""
 if [ "$INSTALL_MODE" = "1" ]; then
     echo "[*] Выбран экспресс-режим."
     STORAGE_MODE="1"
+    SUBDIR_NAME=""
     DEF_SAVE_DIR="${SAVED_SAVE_DIR:-/home/${TARGET_USER}/save}"
     read -rp "[?] Путь к каталогу данных [Enter - ${DEF_SAVE_DIR}]: " INPUT_SAVE_DIR
     SAVE_DIR=${INPUT_SAVE_DIR:-${DEF_SAVE_DIR}}
@@ -199,6 +206,9 @@ if [ "$INSTALL_MODE" = "1" ]; then
     QBIT_PASS="${MASTER_PASS}"
     MIHOMO_SECRET="${MASTER_PASS}"
 
+    DUCKDNS_NAME=""
+    DUCKDNS_TOKEN=""
+    BASE_DOMAIN=""
     VAULT_DOMAIN="vault.local"
     ADGUARD_DOMAIN="adguard.local"
     TORRENT_DOMAIN="torrent.local"
@@ -309,7 +319,7 @@ else
         fi
 
         mkdir -p "${MOUNT_ROOT}"
-        mountpoint -q "${MOUNT_ROOT}" || mount -o uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000 "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
+        mountpoint -q "${MOUNT_ROOT}" || mount -o "uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000" "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
 
         DEF_SUBDIR="${SAVED_SUBDIR_NAME:-save}"
         read -rp "[?] Имя подкаталога на диске для данных [${DEF_SUBDIR}]: " SUBDIR_NAME
@@ -364,13 +374,14 @@ if [ ! -e "/dev/mapper/${LUKS_MAP_NAME}" ]; then
     cryptsetup open "${CHOSEN_DEV}" "${LUKS_MAP_NAME}"
 fi
 mkdir -p "${MOUNT_ROOT}"
-mountpoint -q "${MOUNT_ROOT}" || mount -o uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000 "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
+mountpoint -q "${MOUNT_ROOT}" || mount -o "uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000" "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
 echo "[*] Перезапуск сервисов..."
 cd /opt/homelab && docker compose restart samba qbittorrent
 echo "[+] Диск смонтирован, сервисы готовы к работе!"
 EOF
         chmod +x /usr/local/bin/homelab-unlock
     else
+        SUBDIR_NAME=""
         DEF_SAVE_DIR="${SAVED_SAVE_DIR:-/home/${TARGET_USER}/save}"
         read -rp "[?] Каталог хранения данных на системном диске [${DEF_SAVE_DIR}]: " INPUT_SAVE_DIR
         SAVE_DIR=${INPUT_SAVE_DIR:-${DEF_SAVE_DIR}}
@@ -399,13 +410,13 @@ EOF
     SSL_MODE=${SSL_MODE:-${SAVED_SSL_MODE:-1}}
 
     if [ "$SSL_MODE" = "2" ]; then
-        read -rp "[?] Поддомен DuckDNS [${SAVED_DUCKDNS_NAME}]: " DUCKDNS_NAME
-        DUCKDNS_NAME=${DUCKDNS_NAME:-$SAVED_DUCKDNS_NAME}
+        read -rp "[?] Поддомен DuckDNS [${SAVED_DUCKDNS_NAME:-}]: " DUCKDNS_NAME
+        DUCKDNS_NAME=${DUCKDNS_NAME:-${SAVED_DUCKDNS_NAME:-}}
         while [ -z "$DUCKDNS_NAME" ]; do
             read -rp "[-] Имя обязательно: " DUCKDNS_NAME
         done
-        read -rp "[?] Токен DuckDNS [${SAVED_DUCKDNS_TOKEN}]: " DUCKDNS_TOKEN
-        DUCKDNS_TOKEN=${DUCKDNS_TOKEN:-$SAVED_DUCKDNS_TOKEN}
+        read -rp "[?] Токен DuckDNS [${SAVED_DUCKDNS_TOKEN:-}]: " DUCKDNS_TOKEN
+        DUCKDNS_TOKEN=${DUCKDNS_TOKEN:-${SAVED_DUCKDNS_TOKEN:-}}
         while [ -z "$DUCKDNS_TOKEN" ]; do
             read -rp "[-] Токен обязателен: " DUCKDNS_TOKEN
         done
@@ -417,17 +428,22 @@ EOF
         PROXY_DOMAIN="proxy.${BASE_DOMAIN}"
     else
         SSL_MODE="1"
+        DUCKDNS_NAME=""
+        DUCKDNS_TOKEN=""
+        BASE_DOMAIN=""
         VAULT_DOMAIN="vault.local"
         ADGUARD_DOMAIN="adguard.local"
         TORRENT_DOMAIN="torrent.local"
         PROXY_DOMAIN="proxy.local"
     fi
 
+    SUB_URL="${SAVED_SUB_URL:-none}"
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
         read -rp "[?] Ссылка на Clash-подписку (Enter для DIRECT-режима) [${SAVED_SUB_URL:-none}]: " SUB_URL
         SUB_URL=${SUB_URL:-${SAVED_SUB_URL:-none}}
     fi
 
+    QBIT_THEME="${SAVED_QBIT_THEME:-1}"
     if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
         read -rp "[?] Тема qBittorrent: 1) VueTorrent 2) Стандартная [${SAVED_QBIT_THEME:-1}]: " QBIT_THEME
         QBIT_THEME=${QBIT_THEME:-${SAVED_QBIT_THEME:-1}}
@@ -478,29 +494,14 @@ EOF
 chmod 600 "${ENV_FILE}"
 
 # ==========================================
-# 3. УСТАНОВКА DOCKER И НАСТРОЙКА ЗЕРКАЛ
+# 3. НАСТРОЙКА DOCKER И СЕТЕВОГО СТЕКА
 # ==========================================
-echo "=== [1/6] Установка Docker CE и системных компонентов ==="
+echo "=== [1/6] Настройка демона Docker и сетевых параметров ==="
 
-if [ "${DISTRO_TYPE}" = "arch" ]; then
-    pacman -Syu --noconfirm --needed docker docker-compose curl jq ca-certificates iptables-nft apache unzip tar python sqlite
-else
-    install -m 0755 -d /etc/apt/keyrings
-    if [ ! -f /etc/apt/keyrings/docker.asc ]; then
-        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
-    fi
+modprobe tun 2>/dev/null || true
+mkdir -p /etc/modules-load.d
+echo "tun" > /etc/modules-load.d/tun.conf
 
-    DEB_SUITE="${VERSION_CODENAME:-trixie}"
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${DEB_SUITE} stable" > /etc/apt/sources.list.d/docker.list
-
-    apt-get update -qq
-    apt-get install -y --no-install-recommends \
-        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
-        apache2-utils curl jq unzip tar iptables sqlite3 python3
-fi
-
-# Зеркала Docker Registry от таймаутов загрузки
 mkdir -p /etc/docker
 cat <<EOF > /etc/docker/daemon.json
 {
@@ -518,11 +519,12 @@ systemctl restart docker
 AGH_HASH=$(htpasswd -B -C 10 -n -b "${ADMIN_USER}" "${AGH_PASS}" | cut -d: -f2)
 
 QBIT_PBKDF2_HASH=$(python3 -c "
-import os, base64, hashlib
+import os, base64, hashlib, sys
+password = sys.stdin.read().rstrip('\r\n').encode('utf-8')
 salt = os.urandom(16)
-key = hashlib.pbkdf2_hmac('sha512', b'''${QBIT_PASS}''', salt, 100000, 64)
+key = hashlib.pbkdf2_hmac('sha512', password, salt, 100000, 64)
 print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(key).decode()})')
-")
+" <<< "${QBIT_PASS}")
 
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
     if systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]; then
@@ -584,11 +586,9 @@ chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}" 2>/dev/null || true
 chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/qbittorrent"
 
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-    curl -sL "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip" -o /tmp/metacubexd.zip
-    mkdir -p /tmp/metacubexd-extract
-    unzip -qo /tmp/metacubexd.zip -d /tmp/metacubexd-extract
-    cp -rf /tmp/metacubexd-extract/*/* "${APP_DIR}/mihomo/ui/"
-    rm -rf /tmp/metacubexd.zip /tmp/metacubexd-extract
+    echo "[*] Загрузка панели управления MetaCubeXD..."
+    curl -sL "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz" | \
+        tar -xz -C "${APP_DIR}/mihomo/ui" --strip-components=1 2>/dev/null || true
 
     find "${APP_DIR}/mihomo/ui" -type f \( -name "*.js" -o -name "*.html" \) -exec sed -i \
       -e "s|http://127.0.0.1:9090|https://${PROXY_DOMAIN}/api|g" \
@@ -601,9 +601,7 @@ fi
 USE_ALT_UI="false"
 if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]] && [ "${QBIT_THEME}" = "1" ]; then
     echo "[+] Загрузка темы VueTorrent..."
-    VUETORRENT_URL=$(curl -s https://api.github.com/repos/VueTorrent/VueTorrent/releases/latest | jq -r '.assets[] | select(.name=="vuetorrent.zip") | .browser_download_url')
-    if [ -n "$VUETORRENT_URL" ] && [ "$VUETORRENT_URL" != "null" ]; then
-        curl -sL "$VUETORRENT_URL" -o /tmp/vuetorrent.zip
+    if curl -sL "https://github.com/VueTorrent/VueTorrent/releases/latest/download/vuetorrent.zip" -o /tmp/vuetorrent.zip; then
         mkdir -p /tmp/vuetorrent-temp
         unzip -qo /tmp/vuetorrent.zip -d /tmp/vuetorrent-temp
         if [ -d "/tmp/vuetorrent-temp/vuetorrent" ]; then
@@ -649,7 +647,7 @@ fi
 # 5. КОНФИГУРАЦИЯ ADGUARD И MIHOMO
 # ==========================================
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-    echo "=== [3/6] Конфигурация AdGuard Home (schema 34) ==="
+    echo "=== [3/6] Конфигурация AdGuard Home (схема 34, чистые фильтры) ==="
     REWRITE_ENTRIES=""
     [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && REWRITE_ENTRIES="${REWRITE_ENTRIES}
     - domain: ${VAULT_DOMAIN}
@@ -703,26 +701,17 @@ dns:
   cache_ttl_max: 300
   cache_optimistic: false
   enable_dnssec: false
-  rewrites:${REWRITE_ENTRIES}
-filters:
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
-    name: AdGuard DNS filter
-    id: 1
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt
-    name: AdAway Default Blocklist
-    id: 2
-  - enabled: true
-    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_34.txt
-    name: HaGeZi Normal Blocklist
-    id: 1789156608
 filtering:
   filtering_enabled: true
   protection_enabled: true
+  rewrites_enabled: true
+  rewrites:${REWRITE_ENTRIES}
+filters: []
+whitelist_filters: []
+user_rules: []
 EOF
 
-    echo "=== [4/6] Конфигурация Mihomo (с поддержкой CORS) ==="
+    echo "=== [4/6] Конфигурация Mihomo TUN ==="
     if [ "${SUB_URL}" = "none" ]; then
         cat <<EOF > "${APP_DIR}/mihomo/config.yaml"
 mixed-port: 7890
@@ -745,6 +734,8 @@ dns:
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
     - "*.local"
+    - "+.local"
+    - "+.lan"
   nameserver:
     - 1.1.1.1
     - 8.8.8.8
@@ -783,6 +774,8 @@ dns:
   fake-ip-filter:
     - "*.local"
     - "*.duckdns.org"
+    - "+.local"
+    - "+.lan"
   nameserver:
     - https://dns.cloudflare.com/dns-query
     - https://dns.google/dns-query
@@ -823,6 +816,11 @@ proxy-groups:
 rules:
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,duckdns.org,DIRECT
+  - IP-CIDR,${LAN_SUBNET},DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - GEOIP,private,DIRECT,no-resolve
   - GEOIP,lan,DIRECT,no-resolve
   - MATCH,PROXY
@@ -842,7 +840,6 @@ cat <<EOF > "${APP_DIR}/caddy/Caddyfile"
 EOF
 
 if [ "$SSL_MODE" = "2" ]; then
-    # Wildcard-режим для DuckDNS (один сертификат сразу для всех сервисов без конфликта TXT)
     cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
 *.${BASE_DOMAIN} {
     tls {
@@ -892,7 +889,6 @@ EOF
     echo "}" >> "${APP_DIR}/caddy/Caddyfile"
 
 else
-    # Режим внутреннего центра сертификации (*.local)
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
         cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
 ${VAULT_DOMAIN} {
@@ -1016,7 +1012,7 @@ if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
     container_name: vaultwarden
     restart: unless-stopped
     environment:
-      - WEBSOCKET_ENABLED=true
+      - DOMAIN=https://${VAULT_DOMAIN}
     volumes:
       - ./vaultwarden:/data
 
@@ -1049,7 +1045,6 @@ cat <<EOF >> "${APP_DIR}/docker-compose.yml"
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=86400
       - WATCHTOWER_INCLUDE_RESTARTING=true
-      - DOCKER_API_VERSION=1.44
 EOF
 
 cat <<EOF > /etc/systemd/system/homelab.service
@@ -1064,7 +1059,8 @@ ${STORAGE_DEP_LINE}
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
-ExecStartPre=/usr/sbin/iptables -P FORWARD ACCEPT
+ExecStartPre=/usr/bin/iptables -P FORWARD ACCEPT
+ExecStartPre=/usr/bin/sh -c 'iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE'
 ExecStart=/usr/bin/docker compose up -d
 ExecStop=/usr/bin/docker compose down
 TimeoutStartSec=0
@@ -1097,7 +1093,9 @@ mkdir -p "${BACKUP_DIR}"
 if [ -f "${DB_SRC}" ]; then
     sqlite3 "${DB_SRC}" ".backup '${TEMP_DIR}/db.sqlite3'"
     [ -d "${DATA_DIR}/attachments" ] && cp -r "${DATA_DIR}/attachments" "${TEMP_DIR}/"
+    [ -d "${DATA_DIR}/sends" ] && cp -r "${DATA_DIR}/sends" "${TEMP_DIR}/"
     [ -f "${DATA_DIR}/rsa_key.pem" ] && cp -f "${DATA_DIR}/rsa_key.pem" "${TEMP_DIR}/"
+    [ -f "${DATA_DIR}/config.json" ] && cp -f "${DATA_DIR}/config.json" "${TEMP_DIR}/"
 
     tar -czf "${BACKUP_DIR}/vaultwarden_backup_${DATE_TAG}.tar.gz" -C "${TEMP_DIR}" .
     chown -R __TARGET_USER__:__TARGET_USER__ "${BACKUP_DIR}" 2>/dev/null || true
@@ -1145,14 +1143,17 @@ docker compose up -d
 
 if [ "$SSL_MODE" = "1" ]; then
     echo "[*] Экспорт корневого CA сертификата..."
-    sleep 5
     CADDY_ROOT_CERT="${APP_DIR}/caddy/data/caddy/pki/authorities/local/root.crt"
-    if [ -f "${CADDY_ROOT_CERT}" ]; then
-        mkdir -p "${SAVE_DIR}/certificates"
-        cp -f "${CADDY_ROOT_CERT}" "${SAVE_DIR}/certificates/caddy-root.crt"
-        chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}/certificates" 2>/dev/null || true
-        chmod 644 "${SAVE_DIR}/certificates/caddy-root.crt" 2>/dev/null || true
-    fi
+    for _ in {1..30}; do
+        if [ -f "${CADDY_ROOT_CERT}" ]; then
+            mkdir -p "${SAVE_DIR}/certificates"
+            cp -f "${CADDY_ROOT_CERT}" "${SAVE_DIR}/certificates/caddy-root.crt"
+            chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}/certificates" 2>/dev/null || true
+            chmod 644 "${SAVE_DIR}/certificates/caddy-root.crt" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
 fi
 
 QUICK_PROXY_URL="https://${PROXY_DOMAIN}/#/setup?protocol=https:&hostname=${PROXY_DOMAIN}&port=443&path=api&secret=${MIHOMO_SECRET}"
@@ -1193,7 +1194,7 @@ fi
 if [ "$STORAGE_MODE" != "1" ]; then
 echo "  [+] Управление подключенным накопителем:"
 echo "      Точка монтирования:  ${MOUNT_ROOT}"
-echo "      Каталог сервисов:   ${SAVE_DIR}"
+echo "      Каталог сервисов:    ${SAVE_DIR}"
 [ "$STORAGE_MODE" = "4" ] || [ "$STORAGE_MODE" = "5" ] && echo "      Ручная разблокировка: sudo homelab-unlock"
 echo ""
 fi
