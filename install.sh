@@ -7,11 +7,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-exec < /dev/tty
+# Подключаем TTY для интерактивности только если он доступен
+[ -c /dev/tty ] && exec < /dev/tty || true
 
 clear
 echo "========================================================="
-echo "   Homelab & Gateway Setup for Arch Linux                "
+echo "   Homelab & Gateway Setup (Arch Linux / Ubuntu / Debian)"
 echo "   (AdGuard, Mihomo TUN, Vaultwarden, qBit, Samba)       "
 echo "========================================================="
 echo ""
@@ -32,11 +33,16 @@ else
     exit 1
 fi
 
+DISTRO_FAMILY=""
 if [[ "${OS_ID}" =~ ^(arch|artix|endeavouros|manjaro)$ ]] || [[ "${OS_ID_LIKE}" =~ arch ]]; then
+    DISTRO_FAMILY="arch"
     echo "[+] Обнаружена система семейства Arch Linux (${PRETTY_NAME:-Arch Linux})"
+elif [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (ubuntu|debian) ]]; then
+    DISTRO_FAMILY="debian"
+    echo "[+] Обнаружена система семейства Ubuntu / Debian (${PRETTY_NAME:-Ubuntu})"
 else
     echo "[-] Неподдерживаемый дистрибутив: ${OS_ID}."
-    echo "    Этот скрипт оптимизирован исключительно для Arch Linux."
+    echo "    Скрипт поддерживает Arch Linux, Ubuntu (24.04/26.04) и Debian (12/13)."
     exit 1
 fi
 
@@ -47,26 +53,143 @@ if [ -f "${ENV_FILE}" ]; then
 fi
 
 # ==========================================
+# ФУНКЦИЯ СИНХРОНИЗАЦИИ ВРЕМЕНИ
+# ==========================================
+sync_system_time() {
+    echo "[*] Проверка и синхронизация системного времени..."
+
+    # 1. Первичная экспресс-коррекция по HTTP (без TLS, чтобы не блокироваться ошибками сертификатов)
+    local HTTP_DATE=""
+    if command -v curl >/dev/null 2>&1; then
+        HTTP_DATE=$(curl -sI -m 4 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null | grep -i '^date:' | head -n1 | cut -d' ' -f2- || true)
+        [ -z "${HTTP_DATE}" ] && HTTP_DATE=$(curl -sI -m 4 http://deb.debian.org 2>/dev/null | grep -i '^date:' | head -n1 | cut -d' ' -f2- || true)
+    elif command -v wget >/dev/null 2>&1; then
+        HTTP_DATE=$(wget --server-response --spider --timeout=4 http://deb.debian.org 2>&1 | grep -i '^[[:space:]]*date:' | head -n1 | sed -e 's/^[[:space:]]*[Dd]ate:[[:space:]]*//' || true)
+    fi
+
+    if [ -n "${HTTP_DATE}" ]; then
+        if date -s "${HTTP_DATE}" >/dev/null 2>&1; then
+            echo "[+] Время скорректировано по HTTP: $(date -R)"
+        fi
+    fi
+
+    # 2. Настройка и запуск службы времени systemd
+    if command -v timedatectl >/dev/null 2>&1; then
+        timedatectl set-ntp true 2>/dev/null || true
+    fi
+
+    if systemctl list-unit-files 2>/dev/null | grep -q 'systemd-timesyncd'; then
+        systemctl unmask systemd-timesyncd 2>/dev/null || true
+        systemctl enable --now systemd-timesyncd 2>/dev/null || true
+        systemctl restart systemd-timesyncd 2>/dev/null || true
+    fi
+
+    # 3. Ожидание фиксации NTP (до 5 секунд)
+    local SYNCED=false
+    for _ in {1..5}; do
+        if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = "yes" ]; then
+            SYNCED=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "${SYNCED}" = "true" ]; then
+        echo "[+] Системное время синхронизировано через NTP: $(date)"
+    else
+        echo "[*] Текущее время системы: $(date -R)"
+    fi
+}
+
+# ==========================================
 # 1. ПЕРВИЧНАЯ ПОДГОТОВКА И ОПРЕДЕЛЕНИЕ СЕТИ
 # ==========================================
+sync_system_time
+
 echo "[*] Обновление базы пакетов и установка зависимостей..."
-pacman -Syu --noconfirm --needed \
-    python \
-    iproute2 \
-    cryptsetup \
-    exfatprogs \
-    ntfs-3g \
-    util-linux \
-    curl \
-    ca-certificates \
-    jq \
-    iptables-nft \
-    apache \
-    unzip \
-    tar \
-    sqlite \
-    docker \
-    docker-compose
+
+if [ "${DISTRO_FAMILY}" = "arch" ]; then
+    pacman -Syu --noconfirm --needed \
+        python \
+        iproute2 \
+        cryptsetup \
+        exfatprogs \
+        ntfs-3g \
+        util-linux \
+        curl \
+        openssl \
+        ca-certificates \
+        jq \
+        iptables \
+        apache \
+        unzip \
+        tar \
+        sqlite \
+        docker \
+        docker-compose \
+        argon2
+elif [ "${DISTRO_FAMILY}" = "debian" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    # Используем обход устаревших дат на случай, если NTP еще не успел подтянуть точное время
+    apt-get update -o Acquire::Check-Valid-Until=false -y || apt-get update -y
+    apt-get install -y --no-install-recommends \
+        systemd-timesyncd \
+        python3 \
+        iproute2 \
+        cryptsetup \
+        exfatprogs \
+        ntfs-3g \
+        util-linux \
+        curl \
+        openssl \
+        ca-certificates \
+        jq \
+        iptables \
+        apache2-utils \
+        unzip \
+        tar \
+        sqlite3 \
+        argon2
+
+    # Повторная синхронизация после гарантированной установки systemd-timesyncd и curl
+    sync_system_time
+
+    # Установка официального Docker Engine CE
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "[*] Установка официального Docker CE..."
+        
+        # Удаляем старые пакеты дистрибутива, если они были установлены ранее
+        apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
+
+        REPO_OS="debian"
+        [[ "${OS_ID}" =~ ubuntu ]] || [[ "${OS_ID_LIKE}" =~ ubuntu ]] && REPO_OS="ubuntu"
+        
+        CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+        if [ -z "${CODENAME}" ]; then
+            CODENAME=$(grep -oP '(?<=(VERSION_CODENAME|UBUNTU_CODENAME)=)[a-zA-Z0-9_-]+' /etc/os-release 2>/dev/null | head -n1 || true)
+        fi
+        
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL "https://download.docker.com/linux/${REPO_OS}/gpg" -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+
+        # Проверка наличия релизной ветки в официальном репозитории Docker
+        TARGET_CODENAME="${CODENAME}"
+        if ! curl -fsIL "https://download.docker.com/linux/${REPO_OS}/dists/${TARGET_CODENAME}/Release" >/dev/null 2>&1; then
+            if [ "${REPO_OS}" = "ubuntu" ]; then
+                TARGET_CODENAME="noble"
+            else
+                TARGET_CODENAME="bookworm"
+            fi
+            echo "[!] Ветка ${CODENAME} пока не опубликована на download.docker.com. Используется стабильная ветка ${TARGET_CODENAME}."
+        fi
+
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${REPO_OS} ${TARGET_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+
+        apt-get update -y
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
+fi
 
 if command -v docker >/dev/null 2>&1; then
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^mihomo$"; then
@@ -92,11 +215,12 @@ fi
 
 REAL_USER="${SUDO_USER:-$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}' /etc/passwd)}"
 TARGET_USER="${SAVED_TARGET_USER:-${REAL_USER:-neko}}"
-USER_UID=$(id -u "${TARGET_USER}" 2>/dev/null || echo 1000)
-USER_GID=$(id -g "${TARGET_USER}" 2>/dev/null || echo 1000)
+id -u "${TARGET_USER}" &>/dev/null || useradd -m -s /bin/bash "${TARGET_USER}"
+USER_UID=$(id -u "${TARGET_USER}")
+USER_GID=$(id -g "${TARGET_USER}")
 
 echo "[+] Параметры определены автоматически:"
-echo "    • Платформа:        ARCH LINUX"
+echo "    • Дистрибутив:      ${PRETTY_NAME:-Linux}"
 echo "    • IP сервера:       ${LOCAL_IP}"
 echo "    • LAN интерфейс:    ${DEFAULT_IFACE}"
 echo "    • Подсеть сети:     ${LAN_SUBNET}"
@@ -106,9 +230,13 @@ echo ""
 select_disk_device() {
     echo ""
     echo "[*] Поиск доступных накопителей..."
-    ROOT_DEV=$(findmnt -n -o SOURCE / 2>/dev/null | sed -E 's/p?[0-9]+$//' || true)
+    ROOT_SRC=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    ROOT_PARENT=$(lsblk -dno PKNAME "${ROOT_SRC}" 2>/dev/null || sed -E 's/p?[0-9]+$//' <<< "${ROOT_SRC}" || true)
 
-    mapfile -t AVAIL_DEVS < <(lsblk -dpbno NAME,SIZE,TYPE,MOUNTPOINT | awk -v root="$ROOT_DEV" '$2 > 0 && $3 != "rom" && $1 !~ root && $4 != "/" {print $1}')
+    mapfile -t AVAIL_DEVS < <(lsblk -dpbno NAME,SIZE,TYPE,MOUNTPOINT | awk -v root="$ROOT_SRC" -v rdisk="$ROOT_PARENT" '
+        $2 > 0 && $3 != "rom" && $4 != "/" && $1 !~ root && (rdisk == "" || $1 !~ rdisk) {
+            print $1
+        }')
 
     if [ ${#AVAIL_DEVS[@]} -eq 0 ]; then
         echo "[-] Дополнительные диски с доступным объемом не найдены!"
@@ -116,17 +244,17 @@ select_disk_device() {
         exit 1
     fi
 
-    echo "Доступные накопители:"
+    echo "Доступные накопители и разделы:"
     for i in "${!AVAIL_DEVS[@]}"; do
         DEV_NAME="${AVAIL_DEVS[$i]}"
         DEV_INFO=$(lsblk -dno SIZE,MODEL,FSTYPE "${DEV_NAME}" 2>/dev/null | xargs)
-        printf "  %d) %-15s [%s]\n" "$((i+1))" "${DEV_NAME}" "${DEV_INFO:-Раздел}"
+        printf "  %d) %-18s [%s]\n" "$((i+1))" "${DEV_NAME}" "${DEV_INFO:-Раздел}"
     done
     echo ""
 
-    read -rp "[?] Выберите номер диска [1-${#AVAIL_DEVS[@]}]: " DEV_IDX
+    read -rp "[?] Выберите номер [1-${#AVAIL_DEVS[@]}]: " DEV_IDX
     while [[ ! "$DEV_IDX" =~ ^[0-9]+$ ]] || [ "$DEV_IDX" -lt 1 ] || [ "$DEV_IDX" -gt "${#AVAIL_DEVS[@]}" ]; do
-        read -rp "[-] Неверный выбор. Введите номер из списка [1-${#AVAIL_DEVS[@]}]: " DEV_IDX
+        read -rp "[-] Неверный выбор. Введите номер из списка: " DEV_IDX
     done
 
     CHOSEN_DEV="${AVAIL_DEVS[$((DEV_IDX-1))]}"
@@ -205,6 +333,7 @@ if [ "$INSTALL_MODE" = "1" ]; then
     AGH_PASS="${MASTER_PASS}"
     QBIT_PASS="${MASTER_PASS}"
     MIHOMO_SECRET="${MASTER_PASS}"
+    VAULT_ADMIN_TOKEN="${SAVED_VAULT_ADMIN_TOKEN:-${MASTER_PASS}}"
 
     DUCKDNS_NAME=""
     DUCKDNS_TOKEN=""
@@ -216,8 +345,8 @@ if [ "$INSTALL_MODE" = "1" ]; then
 else
     echo "--- Настройка хранилища данных ---"
     echo "  1) Путь на системном диске [Enter]"
-    echo "  2) Подключить существующий диск БЕЗ шифрования"
-    echo "  3) Отформатировать диск в exFAT БЕЗ шифрования (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
+    echo "  2) Подключить существующий раздел/диск БЕЗ шифрования"
+    echo "  3) Отформатировать накопитель в exFAT БЕЗ шифрования (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
     echo "  4) Подключить существующий зашифрованный LUKS2 диск"
     echo "  5) Отформатировать диск в LUKS2 + exFAT (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
     DEF_STORAGE_MODE="${SAVED_STORAGE_MODE:-1}"
@@ -318,8 +447,17 @@ else
             fi
         fi
 
+        MAPPER_DEV="/dev/mapper/${LUKS_MAP_NAME}"
+        DEV_FSTYPE=$(blkid -s TYPE -o value "${MAPPER_DEV}" || true)
+        DEV_FSTYPE=${DEV_FSTYPE:-exfat}
+
+        MOUNT_OPTS="defaults,noatime,nofail,x-systemd.device-timeout=15s"
+        if [ "$DEV_FSTYPE" = "exfat" ] || [ "$DEV_FSTYPE" = "ntfs" ] || [ "$DEV_FSTYPE" = "vfat" ]; then
+            MOUNT_OPTS="${MOUNT_OPTS},uid=${USER_UID},gid=${USER_GID},umask=000,iocharset=utf8"
+        fi
+
         mkdir -p "${MOUNT_ROOT}"
-        mountpoint -q "${MOUNT_ROOT}" || mount -o "uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000" "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
+        mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
 
         DEF_SUBDIR="${SAVED_SUBDIR_NAME:-save}"
         read -rp "[?] Имя подкаталога на диске для данных [${DEF_SUBDIR}]: " SUBDIR_NAME
@@ -353,7 +491,7 @@ else
                 echo "${LUKS_MAP_NAME} UUID=${DEV_UUID} ${KEY_FILE} luks,nofail,timeout=15" >> /etc/crypttab
             fi
 
-            FSTAB_LINE="/dev/mapper/${LUKS_MAP_NAME} ${MOUNT_ROOT} exfat defaults,noatime,nofail,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000,x-systemd.device-timeout=15s 0 0"
+            FSTAB_LINE="${MAPPER_DEV} ${MOUNT_ROOT} ${DEV_FSTYPE} ${MOUNT_OPTS} 0 0"
             if ! grep -q "${MOUNT_ROOT}" /etc/fstab 2>/dev/null; then
                 echo "${FSTAB_LINE}" >> /etc/fstab
             fi
@@ -369,14 +507,14 @@ if [ "\$EUID" -ne 0 ]; then
     echo "[-] Запустите через sudo: sudo homelab-unlock"
     exit 1
 fi
-if [ ! -e "/dev/mapper/${LUKS_MAP_NAME}" ]; then
+if [ ! -e "${MAPPER_DEV}" ]; then
     echo "[*] Разблокировка ${CHOSEN_DEV}..."
     cryptsetup open "${CHOSEN_DEV}" "${LUKS_MAP_NAME}"
 fi
 mkdir -p "${MOUNT_ROOT}"
-mountpoint -q "${MOUNT_ROOT}" || mount -o "uid=${USER_UID},gid=${USER_GID},iocharset=utf8,umask=000" "/dev/mapper/${LUKS_MAP_NAME}" "${MOUNT_ROOT}"
-echo "[*] Перезапуск сервисов..."
-cd /opt/homelab && docker compose restart samba qbittorrent
+mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
+echo "[*] Запуск сервисов Docker..."
+cd /opt/homelab && docker compose up -d
 echo "[+] Диск смонтирован, сервисы готовы к работе!"
 EOF
         chmod +x /usr/local/bin/homelab-unlock
@@ -461,6 +599,14 @@ EOF
     AGH_PASS="${MASTER_PASS}"
     QBIT_PASS="${MASTER_PASS}"
     MIHOMO_SECRET="${MASTER_PASS}"
+
+    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+        DEF_VAULT_TOKEN="${SAVED_VAULT_ADMIN_TOKEN:-${MASTER_PASS}}"
+        read -rp "[?] Токен/пароль администратора Vaultwarden (/admin) [${DEF_VAULT_TOKEN}]: " INPUT_VAULT_TOKEN
+        VAULT_ADMIN_TOKEN=${INPUT_VAULT_TOKEN:-${DEF_VAULT_TOKEN}}
+    else
+        VAULT_ADMIN_TOKEN="${SAVED_VAULT_ADMIN_TOKEN:-${MASTER_PASS}}"
+    fi
 fi
 
 SHARE_NAME=$(basename "${SAVE_DIR}")
@@ -486,6 +632,7 @@ SAVED_QBIT_THEME="${QBIT_THEME}"
 SAVED_TARGET_USER="${TARGET_USER}"
 SAVED_ADMIN_USER="${ADMIN_USER}"
 SAVED_MASTER_PASS="${MASTER_PASS}"
+SAVED_VAULT_ADMIN_TOKEN="${VAULT_ADMIN_TOKEN}"
 SAVED_STORAGE_MODE="${STORAGE_MODE}"
 SAVED_SUBDIR_NAME="${SUBDIR_NAME}"
 SAVED_SAVE_DIR="${SAVE_DIR}"
@@ -502,15 +649,16 @@ modprobe tun 2>/dev/null || true
 mkdir -p /etc/modules-load.d
 echo "tun" > /etc/modules-load.d/tun.conf
 
-mkdir -p /etc/docker
-cat <<EOF > /etc/docker/daemon.json
+if [ ! -f /etc/docker/daemon.json ]; then
+    mkdir -p /etc/docker
+    cat <<EOF > /etc/docker/daemon.json
 {
   "registry-mirrors": [
-    "https://dockerhub.timeweb.cloud",
-    "https://mirror.gcr.io"
+    "https://dockerhub.timeweb.cloud"
   ]
 }
 EOF
+fi
 
 systemctl daemon-reload
 systemctl enable --now docker
@@ -525,6 +673,17 @@ salt = os.urandom(16)
 key = hashlib.pbkdf2_hmac('sha512', password, salt, 100000, 64)
 print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(key).decode()})')
 " <<< "${QBIT_PASS}")
+
+if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+    SALT_VAL=$(python3 -c "import secrets; print(secrets.token_urlsafe(16))" 2>/dev/null || echo "homelabdefaults123")
+    if command -v argon2 >/dev/null 2>&1; then
+        VAULT_ADMIN_HASH=$(printf '%s' "${VAULT_ADMIN_TOKEN}" | argon2 "${SALT_VAL}" -e -id -k 65540 -t 3 -p 4 2>/dev/null || true)
+    fi
+    if [ -z "${VAULT_ADMIN_HASH:-}" ]; then
+        VAULT_ADMIN_HASH="${VAULT_ADMIN_TOKEN}"
+    fi
+    VAULT_ADMIN_HASH_ESCAPED="${VAULT_ADMIN_HASH//\$/\$\$}"
+fi
 
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
     if systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]; then
@@ -557,10 +716,11 @@ fi
 
 for DOMAIN in "${VAULT_DOMAIN}" "${ADGUARD_DOMAIN}" "${TORRENT_DOMAIN}" "${PROXY_DOMAIN}"; do
     if [ -n "${DOMAIN}" ]; then
-        if ! grep -q "${DOMAIN}" /etc/hosts; then
+        ESCAPED_DOMAIN=$(printf '%s\n' "${DOMAIN}" | sed -e 's/[]\/$*.^[]/\\&/g')
+        if ! grep -q "[[:space:]]${ESCAPED_DOMAIN}$" /etc/hosts; then
             echo "${LOCAL_IP} ${DOMAIN}" >> /etc/hosts
         else
-            sed -i "s/.*${DOMAIN}/${LOCAL_IP} ${DOMAIN}/" /etc/hosts
+            sed -i "s/.*[[:space:]]${ESCAPED_DOMAIN}$/${LOCAL_IP} ${DOMAIN}/" /etc/hosts
         fi
     fi
 done
@@ -569,8 +729,7 @@ done
 # 4. ДИРЕКТОРИИ И СТРУКТУРА СЕРВИСОВ
 # ==========================================
 echo "=== [2/6] Создание файловой структуры ==="
-id -u "${TARGET_USER}" &>/dev/null || useradd -m -s /bin/bash "${TARGET_USER}"
-usermod -aG docker "${TARGET_USER}" || true
+usermod -aG docker "${TARGET_USER}" 2>/dev/null || true
 
 mkdir -p "${SAVE_DIR}/torrent/incomplete"
 mkdir -p "${SAVE_DIR}/backups/vaultwarden"
@@ -647,7 +806,7 @@ fi
 # 5. КОНФИГУРАЦИЯ ADGUARD И MIHOMO
 # ==========================================
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-    echo "=== [3/6] Конфигурация AdGuard Home (схема 34, чистые фильтры) ==="
+    echo "=== [3/6] Конфигурация AdGuard Home ==="
     REWRITE_ENTRIES=""
     [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && REWRITE_ENTRIES="${REWRITE_ENTRIES}
     - domain: ${VAULT_DOMAIN}
@@ -734,6 +893,7 @@ dns:
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter:
     - "*.local"
+    - "*.duckdns.org"
     - "+.local"
     - "+.lan"
   nameserver:
@@ -747,6 +907,8 @@ tun:
   auto-detect-interface: true
   route-exclude-address:
     - "${LAN_SUBNET}"
+    - "172.16.0.0/12"
+    - "10.0.0.0/8"
 
 rules:
   - MATCH,DIRECT
@@ -789,6 +951,8 @@ tun:
   auto-detect-interface: true
   route-exclude-address:
     - "${LAN_SUBNET}"
+    - "172.16.0.0/12"
+    - "10.0.0.0/8"
 
 proxy-providers:
   my-sub:
@@ -1013,6 +1177,7 @@ if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
     restart: unless-stopped
     environment:
       - DOMAIN=https://${VAULT_DOMAIN}
+      - ADMIN_TOKEN=${VAULT_ADMIN_HASH_ESCAPED}
     volumes:
       - ./vaultwarden:/data
 
@@ -1059,10 +1224,10 @@ ${STORAGE_DEP_LINE}
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
-ExecStartPre=/usr/bin/iptables -P FORWARD ACCEPT
-ExecStartPre=/usr/bin/sh -c 'iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE'
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+ExecStartPre=/bin/sh -c 'iptables -P FORWARD ACCEPT'
+ExecStartPre=/bin/sh -c 'iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE'
+ExecStart=/bin/sh -c 'docker compose up -d'
+ExecStop=/bin/sh -c 'docker compose down'
 TimeoutStartSec=0
 
 [Install]
@@ -1166,7 +1331,10 @@ echo "   Установка и настройка успешно заверше�
 echo "========================================================="
 echo ""
 echo "  [+] Адреса веб-сервисов (HTTPS):"
-[[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && echo "      • Менеджер паролей: https://${VAULT_DOMAIN}"
+if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+echo "      • Менеджер паролей: https://${VAULT_DOMAIN}"
+echo "      • Панель админа:    https://${VAULT_DOMAIN}/admin"
+fi
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
 echo "      • AdGuard Home:     https://${ADGUARD_DOMAIN}"
 echo "      • Mihomo UI:        https://${PROXY_DOMAIN}"
@@ -1177,6 +1345,7 @@ echo ""
 echo "  [+] Доступы и аутентификация:"
 echo "      • Логин (веб-панели и SMB): ${ADMIN_USER}"
 echo "      • Пароль (панели и SMB):    ${MASTER_PASS}"
+[[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && echo "      • Токен админа Vaultwarden: ${VAULT_ADMIN_TOKEN}"
 echo "      • Секрет Mihomo:            ${MIHOMO_SECRET}"
 echo ""
 if [ "$SSL_MODE" = "1" ]; then
