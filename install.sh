@@ -113,7 +113,7 @@ if [ "${DISTRO_FAMILY}" = "arch" ]; then
         python \
         iproute2 \
         cryptsetup \
-        exfatprogs \
+        btrfs-progs \
         ntfs-3g \
         util-linux \
         curl \
@@ -130,14 +130,13 @@ if [ "${DISTRO_FAMILY}" = "arch" ]; then
         argon2
 elif [ "${DISTRO_FAMILY}" = "debian" ]; then
     export DEBIAN_FRONTEND=noninteractive
-    # Используем обход устаревших дат на случай, если NTP еще не успел подтянуть точное время
     apt-get update -o Acquire::Check-Valid-Until=false -y || apt-get update -y
     apt-get install -y --no-install-recommends \
         systemd-timesyncd \
         python3 \
         iproute2 \
         cryptsetup \
-        exfatprogs \
+        btrfs-progs \
         ntfs-3g \
         util-linux \
         curl \
@@ -151,14 +150,10 @@ elif [ "${DISTRO_FAMILY}" = "debian" ]; then
         sqlite3 \
         argon2
 
-    # Повторная синхронизация после гарантированной установки systemd-timesyncd и curl
     sync_system_time
 
-    # Установка официального Docker Engine CE
     if ! command -v docker >/dev/null 2>&1; then
         echo "[*] Установка официального Docker CE..."
-        
-        # Удаляем старые пакеты дистрибутива, если они были установлены ранее
         apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
 
         REPO_OS="debian"
@@ -173,7 +168,6 @@ elif [ "${DISTRO_FAMILY}" = "debian" ]; then
         curl -fsSL "https://download.docker.com/linux/${REPO_OS}/gpg" -o /etc/apt/keyrings/docker.asc
         chmod a+r /etc/apt/keyrings/docker.asc
 
-        # Проверка наличия релизной ветки в официальном репозитории Docker
         TARGET_CODENAME="${CODENAME}"
         if ! curl -fsIL "https://download.docker.com/linux/${REPO_OS}/dists/${TARGET_CODENAME}/Release" >/dev/null 2>&1; then
             if [ "${REPO_OS}" = "ubuntu" ]; then
@@ -346,9 +340,9 @@ else
     echo "--- Настройка хранилища данных ---"
     echo "  1) Путь на системном диске [Enter]"
     echo "  2) Подключить существующий раздел/диск БЕЗ шифрования"
-    echo "  3) Отформатировать накопитель в exFAT БЕЗ шифрования (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
+    echo "  3) Отформатировать накопитель в Btrfs БЕЗ шифрования (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
     echo "  4) Подключить существующий зашифрованный LUKS2 диск"
-    echo "  5) Отформатировать диск в LUKS2 + exFAT (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
+    echo "  5) Отформатировать диск в LUKS2 + Btrfs (ВСЕ ДАННЫЕ УДАЛЯТСЯ)"
     DEF_STORAGE_MODE="${SAVED_STORAGE_MODE:-1}"
     read -rp "[?] Выберите вариант хранилища [1/2/3/4/5] [${DEF_STORAGE_MODE}]: " STORAGE_MODE
     STORAGE_MODE=${STORAGE_MODE:-${DEF_STORAGE_MODE}}
@@ -362,9 +356,12 @@ else
         MOUNT_OPTS="defaults,noatime,nofail,x-systemd.device-timeout=15s"
         if [ "$DEV_FSTYPE" = "exfat" ] || [ "$DEV_FSTYPE" = "ntfs" ] || [ "$DEV_FSTYPE" = "vfat" ]; then
             MOUNT_OPTS="${MOUNT_OPTS},uid=${USER_UID},gid=${USER_GID},umask=000,iocharset=utf8"
+        elif [ "$DEV_FSTYPE" = "btrfs" ]; then
+            MOUNT_OPTS="${MOUNT_OPTS},compress=zstd"
         fi
 
         mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${CHOSEN_DEV}" "${MOUNT_ROOT}"
+        [ "$DEV_FSTYPE" = "btrfs" ] && chown -R "${TARGET_USER}:${TARGET_USER}" "${MOUNT_ROOT}" 2>/dev/null || true
 
         if [ -n "${DEV_UUID}" ] && ! grep -q "${DEV_UUID}" /etc/fstab 2>/dev/null; then
             echo "UUID=${DEV_UUID} ${MOUNT_ROOT} ${DEV_FSTYPE:-auto} ${MOUNT_OPTS} 0 0" >> /etc/fstab
@@ -381,7 +378,7 @@ else
         select_disk_device
         echo ""
         echo "[!] ВНИМАНИЕ: Все данные на ${CHOSEN_DEV} будут уничтожены!"
-        read -rp "[?] Подтвердите форматирование в exFAT (введите 'yes' или 'YES'): " CONFIRM_WIPE
+        read -rp "[?] Подтвердите форматирование в Btrfs (введите 'yes' или 'YES'): " CONFIRM_WIPE
         if [[ ! "${CONFIRM_WIPE}" =~ ^[Yy][Ee][Ss]$ ]]; then
             echo "[-] Отмена операции. Скрипт остановлен."
             exit 1
@@ -391,17 +388,18 @@ else
         echo "[*] Очистка старых сигнатур разметки..."
         wipefs -a "${CHOSEN_DEV}"
 
-        echo "[*] Форматирование устройства ${CHOSEN_DEV} в exFAT..."
-        mkfs.exfat -L "HOMELAB" "${CHOSEN_DEV}"
+        echo "[*] Форматирование устройства ${CHOSEN_DEV} в Btrfs..."
+        mkfs.btrfs -f -L "HOMELAB" "${CHOSEN_DEV}"
 
         DEV_UUID=$(blkid -s UUID -o value "${CHOSEN_DEV}")
 
         mkdir -p "${MOUNT_ROOT}"
-        MOUNT_OPTS="defaults,noatime,nofail,uid=${USER_UID},gid=${USER_GID},umask=000,iocharset=utf8,x-systemd.device-timeout=15s"
+        MOUNT_OPTS="defaults,noatime,compress=zstd,nofail,x-systemd.device-timeout=15s"
         mount -o "${MOUNT_OPTS}" "${CHOSEN_DEV}" "${MOUNT_ROOT}"
+        chown -R "${TARGET_USER}:${TARGET_USER}" "${MOUNT_ROOT}"
 
         if [ -n "${DEV_UUID}" ] && ! grep -q "${DEV_UUID}" /etc/fstab 2>/dev/null; then
-            echo "UUID=${DEV_UUID} ${MOUNT_ROOT} exfat ${MOUNT_OPTS} 0 0" >> /etc/fstab
+            echo "UUID=${DEV_UUID} ${MOUNT_ROOT} btrfs ${MOUNT_OPTS} 0 0" >> /etc/fstab
         fi
 
         STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
@@ -410,7 +408,7 @@ else
         SUBDIR_NAME=${SUBDIR_NAME:-${DEF_SUBDIR}}
         SAVE_DIR="${MOUNT_ROOT}/${SUBDIR_NAME}"
         mkdir -p "${SAVE_DIR}"
-        echo "[+] Диск отформатирован в exFAT и смонтирован в ${MOUNT_ROOT}"
+        echo "[+] Диск отформатирован в Btrfs и смонтирован в ${MOUNT_ROOT}"
 
     elif [ "$STORAGE_MODE" = "4" ] || [ "$STORAGE_MODE" = "5" ]; then
         select_disk_device
@@ -418,7 +416,7 @@ else
         if [ "$STORAGE_MODE" = "5" ]; then
             echo ""
             echo "[!] ВНИМАНИЕ: Все данные на ${CHOSEN_DEV} будут уничтожены!"
-            read -rp "[?] Подтвердите форматирование (введите 'yes' или 'YES'): " CONFIRM_WIPE
+            read -rp "[?] Подтвердите форматирование в LUKS2 + Btrfs (введите 'yes' или 'YES'): " CONFIRM_WIPE
             if [[ ! "${CONFIRM_WIPE}" =~ ^[Yy][Ee][Ss]$ ]]; then
                 echo "[-] Отмена операции. Скрипт остановлен."
                 exit 1
@@ -436,8 +434,8 @@ else
             echo "[*] Открытие созданного тома..."
             cryptsetup open "${CHOSEN_DEV}" "${LUKS_MAP_NAME}"
 
-            echo "[*] Форматирование тома в exFAT..."
-            mkfs.exfat -L "HOMELAB" "/dev/mapper/${LUKS_MAP_NAME}"
+            echo "[*] Форматирование тома в Btrfs..."
+            mkfs.btrfs -f -L "HOMELAB" "/dev/mapper/${LUKS_MAP_NAME}"
         fi
 
         if [ "$STORAGE_MODE" = "4" ]; then
@@ -449,15 +447,18 @@ else
 
         MAPPER_DEV="/dev/mapper/${LUKS_MAP_NAME}"
         DEV_FSTYPE=$(blkid -s TYPE -o value "${MAPPER_DEV}" || true)
-        DEV_FSTYPE=${DEV_FSTYPE:-exfat}
+        DEV_FSTYPE=${DEV_FSTYPE:-btrfs}
 
         MOUNT_OPTS="defaults,noatime,nofail,x-systemd.device-timeout=15s"
         if [ "$DEV_FSTYPE" = "exfat" ] || [ "$DEV_FSTYPE" = "ntfs" ] || [ "$DEV_FSTYPE" = "vfat" ]; then
             MOUNT_OPTS="${MOUNT_OPTS},uid=${USER_UID},gid=${USER_GID},umask=000,iocharset=utf8"
+        elif [ "$DEV_FSTYPE" = "btrfs" ]; then
+            MOUNT_OPTS="${MOUNT_OPTS},compress=zstd"
         fi
 
         mkdir -p "${MOUNT_ROOT}"
         mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
+        [ "$DEV_FSTYPE" = "btrfs" ] && chown -R "${TARGET_USER}:${TARGET_USER}" "${MOUNT_ROOT}" 2>/dev/null || true
 
         DEF_SUBDIR="${SAVED_SUBDIR_NAME:-save}"
         read -rp "[?] Имя подкаталога на диске для данных [${DEF_SUBDIR}]: " SUBDIR_NAME
@@ -740,6 +741,10 @@ mkdir -p "${APP_DIR}/adguard/work" "${APP_DIR}/adguard/conf"
 mkdir -p "${APP_DIR}/vaultwarden"
 mkdir -p "${APP_DIR}/qbittorrent/config/qBittorrent"
 mkdir -p "${APP_DIR}/qbittorrent/vuetorrent"
+
+# Отключаем Copy-on-Write (nodatacow) для торрентов и баз данных во избежание фрагментации на Btrfs
+chattr +C "${SAVE_DIR}/torrent" 2>/dev/null || true
+chattr +C "${APP_DIR}/vaultwarden" 2>/dev/null || true
 
 chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}" 2>/dev/null || true
 chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/qbittorrent"
