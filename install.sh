@@ -742,7 +742,7 @@ mkdir -p "${APP_DIR}/vaultwarden"
 mkdir -p "${APP_DIR}/qbittorrent/config/qBittorrent"
 mkdir -p "${APP_DIR}/qbittorrent/vuetorrent"
 
-# Отключаем Copy-on-Write (nodatacow) для торрентов и баз данных во избежание фрагментации на Btrfs
+# Отключаем Copy-on-Write (nodatacow) для торрентов и БД во избежание фрагментации на Btrfs
 chattr +C "${SAVE_DIR}/torrent" 2>/dev/null || true
 chattr +C "${APP_DIR}/vaultwarden" 2>/dev/null || true
 
@@ -1212,6 +1212,7 @@ cat <<EOF >> "${APP_DIR}/docker-compose.yml"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
+      - DOCKER_API_VERSION=1.44
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_POLL_INTERVAL=86400
       - WATCHTOWER_INCLUDE_RESTARTING=true
