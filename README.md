@@ -11,19 +11,9 @@
 Для установки на чистой системе выполните команду с правами root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh | sudo bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)"
 ```
 
-Прямая ссылка на скрипт: [install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)
-
-> **Примечание:** Если требуется предварительно сохранить и проверить скрипт локально:
-> ```bash
-> curl -fsSL -o install.sh https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh
-> chmod +x install.sh
-> sudo ./install.sh
-> ```
-
----
 
 ## 🖥 Поддерживаемые операционные системы
 
