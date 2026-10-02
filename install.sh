@@ -7,13 +7,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Подключаем TTY для интерактивности только если он доступен
 [ -c /dev/tty ] && exec < /dev/tty || true
 
 clear
 echo "========================================================="
 echo "   Homelab & Gateway Setup (Arch Linux / Ubuntu / Debian)"
-echo "   (AdGuard, Mihomo TUN, Vaultwarden, qBit, Samba)       "
+echo "   (AdGuard, Mihomo TUN, Vaultwarden, Gitea, qBit, Samba)"
 echo "========================================================="
 echo ""
 
@@ -24,7 +23,6 @@ ENV_FILE="${APP_DIR}/.env"
 # 0. ПРОВЕРКА ДИСТРИБУТИВА И ЗАГРУЗКА .ENV
 # ==========================================
 if [ -f /etc/os-release ]; then
-    # shellcheck source=/dev/null
     . /etc/os-release
     OS_ID="${ID:-}"
     OS_ID_LIKE="${ID_LIKE:-}"
@@ -42,13 +40,11 @@ elif [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (ubuntu|debi
     echo "[+] Обнаружена система семейства Ubuntu / Debian (${PRETTY_NAME:-Ubuntu})"
 else
     echo "[-] Неподдерживаемый дистрибутив: ${OS_ID}."
-    echo "    Скрипт поддерживает Arch Linux, Ubuntu (24.04/26.04) и Debian (12/13)."
     exit 1
 fi
 
 if [ -f "${ENV_FILE}" ]; then
     echo "[*] Обнаружен файл конфигурации с прошлыми настройками. Значения загружены."
-    # shellcheck source=/dev/null
     source "${ENV_FILE}"
 fi
 
@@ -199,7 +195,6 @@ DEFAULT_IFACE="${PHYS_IFACE:-enp0s3}"
 LOCAL_IP=$(ip -o -4 addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
 LOCAL_IP=${LOCAL_IP:-$(hostname -I | awk '{print $1}')}
 
-# Умное определение реального физического шлюза (роутера)
 ROUTER_GATEWAY=$(ip route show default dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $3}' | head -n1 || true)
 if [ -z "${ROUTER_GATEWAY}" ] || [ "${ROUTER_GATEWAY}" = "${LOCAL_IP}" ]; then
     ROUTER_GATEWAY=$(ip neigh show dev "${DEFAULT_IFACE}" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "${LOCAL_IP}" | head -n1 || true)
@@ -277,7 +272,6 @@ echo ""
 
 if [ "$INSTALL_MODE" = "3" ]; then
     echo "[!] ВНИМАНИЕ: Будут остановлены контейнеры и удалены служебные конфиги стека!"
-    echo "    Docker-образы и файлы в каталоге данных затронуты не будут."
     read -rp "[?] Подтвердите сброс (введите 'yes' или 'YES'): " CONFIRM_RESET
     if [[ ! "${CONFIRM_RESET}" =~ ^[Yy][Ee][Ss]$ ]]; then
         echo "[-] Отмена операции."
@@ -288,7 +282,7 @@ if [ "$INSTALL_MODE" = "3" ]; then
     if [ -d "${APP_DIR}" ]; then
         (cd "${APP_DIR}" && docker compose down -v 2>/dev/null || true)
         echo "[*] Очистка служебных папок..."
-        rm -rf "${APP_DIR}/adguard" "${APP_DIR}/mihomo" "${APP_DIR}/caddy" "${APP_DIR}/qbittorrent" "${APP_DIR}/vaultwarden" "${ENV_FILE}"
+        rm -rf "${APP_DIR}/adguard" "${APP_DIR}/mihomo" "${APP_DIR}/caddy" "${APP_DIR}/qbittorrent" "${APP_DIR}/vaultwarden" "${APP_DIR}/gitea" "${ENV_FILE}"
     fi
     systemctl disable --now network-gateway-watchdog.timer 2>/dev/null || true
     echo "[+] Сброс завершен. Запустите скрипт заново."
@@ -310,6 +304,7 @@ if [ "$INSTALL_MODE" = "1" ]; then
 
     ENABLE_GATEWAY="Y"
     ENABLE_VAULT="Y"
+    ENABLE_GITEA="Y"
     ENABLE_SAMBA="Y"
     ENABLE_QBIT="Y"
     SSL_MODE="1"
@@ -343,6 +338,7 @@ if [ "$INSTALL_MODE" = "1" ]; then
     DUCKDNS_TOKEN=""
     BASE_DOMAIN=""
     VAULT_DOMAIN="vault.local"
+    GITEA_DOMAIN="git.local"
     ADGUARD_DOMAIN="adguard.local"
     TORRENT_DOMAIN="torrent.local"
     PROXY_DOMAIN="proxy.local"
@@ -545,6 +541,9 @@ EOF
     read -rp "[?] Установить Vaultwarden (Менеджер паролей)? [Y/n] [${SAVED_ENABLE_VAULT:-Y}]: " ENABLE_VAULT
     ENABLE_VAULT=${ENABLE_VAULT:-${SAVED_ENABLE_VAULT:-Y}}
 
+    read -rp "[?] Установить Gitea (Git-сервер)? [Y/n] [${SAVED_ENABLE_GITEA:-Y}]: " ENABLE_GITEA
+    ENABLE_GITEA=${ENABLE_GITEA:-${SAVED_ENABLE_GITEA:-Y}}
+
     read -rp "[?] Установить Samba (Сетевая папка Windows)? [Y/n] [${SAVED_ENABLE_SAMBA:-Y}]: " ENABLE_SAMBA
     ENABLE_SAMBA=${ENABLE_SAMBA:-${SAVED_ENABLE_SAMBA:-Y}}
 
@@ -572,6 +571,7 @@ EOF
 
         BASE_DOMAIN="${DUCKDNS_NAME}.duckdns.org"
         VAULT_DOMAIN="vault.${BASE_DOMAIN}"
+        GITEA_DOMAIN="git.${BASE_DOMAIN}"
         ADGUARD_DOMAIN="adguard.${BASE_DOMAIN}"
         TORRENT_DOMAIN="torrent.${BASE_DOMAIN}"
         PROXY_DOMAIN="proxy.${BASE_DOMAIN}"
@@ -581,6 +581,7 @@ EOF
         DUCKDNS_TOKEN=""
         BASE_DOMAIN=""
         VAULT_DOMAIN="vault.local"
+        GITEA_DOMAIN="git.local"
         ADGUARD_DOMAIN="adguard.local"
         TORRENT_DOMAIN="torrent.local"
         PROXY_DOMAIN="proxy.local"
@@ -634,6 +635,7 @@ SAVED_ROUTER_GATEWAY="${ROUTER_GATEWAY}"
 SAVED_LAN_SUBNET="${LAN_SUBNET}"
 SAVED_ENABLE_GATEWAY="${ENABLE_GATEWAY}"
 SAVED_ENABLE_VAULT="${ENABLE_VAULT}"
+SAVED_ENABLE_GITEA="${ENABLE_GITEA}"
 SAVED_ENABLE_SAMBA="${ENABLE_SAMBA}"
 SAVED_ENABLE_QBIT="${ENABLE_QBIT}"
 SAVED_SSL_MODE="${SSL_MODE}"
@@ -700,7 +702,6 @@ fi
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
     echo "[*] Настройка маршрутизации и защиты от сетевых петель..."
     
-    # Отключаем systemd-resolved DNSStubListener, чтобы порт 53 был свободен для AdGuard
     if systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]; then
         mkdir -p /etc/systemd/resolved.conf.d/
         cat <<EOF > /etc/systemd/resolved.conf.d/disable-stub.conf
@@ -710,7 +711,6 @@ EOF
         systemctl restart systemd-resolved || true
     fi
 
-    # Изолируем DNS самого сервера от DHCP роутера и AdGuard (предотвращение DNS-петли)
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
     cat <<EOF > /etc/resolv.conf
@@ -731,12 +731,10 @@ EOF
         iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE
     fi
 
-    # Создание сторожевого демона (Watchdog), гарантирующего привязку к физическому роутеру
     cat << 'EOF' > /usr/local/bin/gateway-watchdog.sh
 #!/usr/bin/env bash
 set -e
 
-# Читаем сохраненные параметры если есть
 [ -f /opt/homelab/.env ] && source /opt/homelab/.env
 
 IFACE="${PHYS_IFACE:-}"
@@ -746,22 +744,17 @@ IFACE="${PHYS_IFACE:-}"
 [ -z "$IFACE" ] && exit 0
 
 SERVER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
-
-# 1. Пытаемся взять известный шлюз из сохраненных
 ROUTER_IP="${SAVED_ROUTER_GATEWAY:-}"
 
-# 2. Если неизвестен, определяем по соседям в ARP-таблице
 if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
     ROUTER_IP=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "$SERVER_IP" | head -n1 || true)
 fi
 
-# 3. Если всё еще пуст — берем .1 подсети
 if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
     ROUTER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sed 's/\.[0-9]*$/.1/' || true)
 fi
 
 if [ -n "$ROUTER_IP" ] && [ "$ROUTER_IP" != "$SERVER_IP" ]; then
-    # Проверяем, существует ли физический default route с высоким приоритетом
     CURRENT_GW=$(ip route show default dev "$IFACE" 2>/dev/null | awk '{print $3}' | head -n1 || true)
     
     if [ "$CURRENT_GW" != "$ROUTER_IP" ]; then
@@ -800,7 +793,7 @@ EOF
     /usr/local/bin/gateway-watchdog.sh || true
 fi
 
-for DOMAIN in "${VAULT_DOMAIN}" "${ADGUARD_DOMAIN}" "${TORRENT_DOMAIN}" "${PROXY_DOMAIN}"; do
+for DOMAIN in "${VAULT_DOMAIN}" "${GITEA_DOMAIN}" "${ADGUARD_DOMAIN}" "${TORRENT_DOMAIN}" "${PROXY_DOMAIN}"; do
     if [ -n "${DOMAIN}" ]; then
         ESCAPED_DOMAIN=$(printf '%s\n' "${DOMAIN}" | sed -e 's/[]\/$*.^[]/\\&/g')
         if ! grep -q "[[:space:]]${ESCAPED_DOMAIN}$" /etc/hosts; then
@@ -829,6 +822,12 @@ mkdir -p "${APP_DIR}/qbittorrent/vuetorrent"
 
 chattr +C "${SAVE_DIR}/torrent" 2>/dev/null || true
 chattr +C "${APP_DIR}/vaultwarden" 2>/dev/null || true
+
+if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+    mkdir -p "${APP_DIR}/gitea"
+    chattr +C "${APP_DIR}/gitea" 2>/dev/null || true
+    chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/gitea"
+fi
 
 chown -R "${TARGET_USER}:${TARGET_USER}" "${SAVE_DIR}" 2>/dev/null || true
 chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/qbittorrent"
@@ -899,6 +898,10 @@ if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
     REWRITE_ENTRIES=""
     [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && REWRITE_ENTRIES="${REWRITE_ENTRIES}
     - domain: ${VAULT_DOMAIN}
+      answer: ${LOCAL_IP}
+      enabled: true"
+    [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]] && REWRITE_ENTRIES="${REWRITE_ENTRIES}
+    - domain: ${GITEA_DOMAIN}
       answer: ${LOCAL_IP}
       enabled: true"
     REWRITE_ENTRIES="${REWRITE_ENTRIES}
@@ -1117,6 +1120,15 @@ EOF
 EOF
     fi
 
+    if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+    @gitea host ${GITEA_DOMAIN}
+    handle @gitea {
+        reverse_proxy gitea:3000
+    }
+EOF
+    fi
+
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
         cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
     @adguard host ${ADGUARD_DOMAIN}
@@ -1155,6 +1167,15 @@ else
 ${VAULT_DOMAIN} {
     tls internal
     reverse_proxy vaultwarden:80
+}
+EOF
+    fi
+
+    if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+        cat <<EOF >> "${APP_DIR}/caddy/Caddyfile"
+${GITEA_DOMAIN} {
+    tls internal
+    reverse_proxy gitea:3000
 }
 EOF
     fi
@@ -1277,6 +1298,34 @@ if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
       - ADMIN_TOKEN=${VAULT_ADMIN_HASH_ESCAPED}
     volumes:
       - ./vaultwarden:/data
+
+EOF
+fi
+
+if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+    cat <<EOF >> "${APP_DIR}/docker-compose.yml"
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=${USER_UID}
+      - USER_GID=${USER_GID}
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__database__PATH=/data/gitea/gitea.db
+      - GITEA__server__ROOT_URL=https://${GITEA_DOMAIN}/
+      - GITEA__server__DOMAIN=${GITEA_DOMAIN}
+      - GITEA__server__SSH_DOMAIN=${LOCAL_IP}
+      - GITEA__server__SSH_PORT=2222
+      - GITEA__server__SSH_LISTEN_PORT=22
+      - GITEA__server__LFS_START_SERVER=true
+      - GITEA__service__DISABLE_REGISTRATION=false
+    ports:
+      - "2222:22"
+    volumes:
+      - ./gitea:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
 
 EOF
 fi
@@ -1433,6 +1482,10 @@ echo "  [+] Адреса веб-сервисов (HTTPS):"
 if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
 echo "      • Менеджер паролей: https://${VAULT_DOMAIN}"
 echo "      • Панель админа:    https://${VAULT_DOMAIN}/admin"
+fi
+if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+echo "      • Gitea (Git):      https://${GITEA_DOMAIN}"
+echo "        (SSH-порт клонирования: 2222)"
 fi
 if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
 echo "      • AdGuard Home:     https://${ADGUARD_DOMAIN}"
