@@ -24,14 +24,14 @@
 
 #### Через curl:
 ```bash
-curl -fsSL "[https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)" -o install.sh
+curl -fsSL "https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh" -o install.sh
 chmod +x install.sh
 sudo ./install.sh
 ```
 
 #### Через wget:
 ```bash
-wget -qO install.sh "[https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)"
+wget -qO install.sh "https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh"
 chmod +x install.sh
 sudo ./install.sh
 ```
