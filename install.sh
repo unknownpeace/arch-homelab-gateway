@@ -11,8 +11,8 @@ fi
 
 clear
 echo "========================================================="
-echo "   Homelab & Gateway Setup (Arch Linux / Ubuntu / Debian)"
-echo "   (AdGuard, Mihomo TUN, Vaultwarden, Gitea, qBit, Samba)"
+echo "   Homelab & Gateway Setup (Debian 13 Trixie / Debian / Arch)"
+echo "   (AdGuard, Mihomo TUN Mixed, Vaultwarden, Gitea, qBit)  "
 echo "========================================================="
 echo ""
 
@@ -37,7 +37,7 @@ if [[ "${OS_ID}" =~ ^(arch|artix|endeavouros|manjaro)$ ]] || [[ "${OS_ID_LIKE}" 
     echo "[+] Обнаружена система семейства Arch Linux (${PRETTY_NAME:-Arch Linux})"
 elif [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (ubuntu|debian) ]]; then
     DISTRO_FAMILY="debian"
-    echo "[+] Обнаружена система семейства Ubuntu / Debian (${PRETTY_NAME:-Ubuntu})"
+    echo "[+] Обнаружена система семейства Ubuntu / Debian (${PRETTY_NAME:-Debian})"
 else
     echo "[-] Неподдерживаемый дистрибутив: ${OS_ID}."
     exit 1
@@ -263,7 +263,7 @@ select_disk_device() {
 # 2. ВЫБОР РЕЖИМА УСТАНОВКИ
 # ==========================================
 echo "Выберите вариант развертывания:"
-echo "  1) Экспресс-установка (Всё включено, системный диск, *.local) [Enter]"
+echo "  1) Экспресс-установка (Всё включено, системный диск, *.lan) [Enter]"
 echo "  2) Расширенная настройка (Выбор дисков, форматирование, LUKS2)"
 echo "  3) Начать сначала (Удалить контейнеры и сбросить конфиги без удаления образов)"
 read -rp "[?] Ваш выбор [1/2/3]: " INSTALL_MODE
@@ -337,11 +337,11 @@ if [ "$INSTALL_MODE" = "1" ]; then
     DUCKDNS_NAME=""
     DUCKDNS_TOKEN=""
     BASE_DOMAIN=""
-    VAULT_DOMAIN="vault.local"
-    GITEA_DOMAIN="git.local"
-    ADGUARD_DOMAIN="adguard.local"
-    TORRENT_DOMAIN="torrent.local"
-    PROXY_DOMAIN="proxy.local"
+    VAULT_DOMAIN="vault.lan"
+    GITEA_DOMAIN="git.lan"
+    ADGUARD_DOMAIN="adguard.lan"
+    TORRENT_DOMAIN="torrent.lan"
+    PROXY_DOMAIN="proxy.lan"
 else
     echo "--- Настройка хранилища данных ---"
     echo "  1) Путь на системном диске [Enter]"
@@ -552,7 +552,7 @@ EOF
 
     echo ""
     echo "--- Настройка SSL ---"
-    echo "  1) Caddy Internal (*.local без регистрации в интернете)"
+    echo "  1) Caddy Internal (*.lan без регистрации в интернете)"
     echo "  2) DuckDNS + Let's Encrypt (валидный публичный Wildcard SSL)"
     read -rp "[?] Выберите режим SSL [1/2] [${SAVED_SSL_MODE:-1}]: " SSL_MODE
     SSL_MODE=${SSL_MODE:-${SAVED_SSL_MODE:-1}}
@@ -580,11 +580,11 @@ EOF
         DUCKDNS_NAME=""
         DUCKDNS_TOKEN=""
         BASE_DOMAIN=""
-        VAULT_DOMAIN="vault.local"
-        GITEA_DOMAIN="git.local"
-        ADGUARD_DOMAIN="adguard.local"
-        TORRENT_DOMAIN="torrent.local"
-        PROXY_DOMAIN="proxy.local"
+        VAULT_DOMAIN="vault.lan"
+        GITEA_DOMAIN="git.lan"
+        ADGUARD_DOMAIN="adguard.lan"
+        TORRENT_DOMAIN="torrent.lan"
+        PROXY_DOMAIN="proxy.lan"
     fi
 
     SUB_URL="${SAVED_SUB_URL:-none}"
@@ -714,14 +714,20 @@ EOF
     chattr -i /etc/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf
     cat <<EOF > /etc/resolv.conf
+nameserver 77.88.8.8
 nameserver 1.1.1.1
-nameserver 8.8.8.8
 EOF
     chattr +i /etc/resolv.conf 2>/dev/null || true
 
     cat <<EOF > /etc/sysctl.d/99-gateway.conf
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 EOF
     sysctl --system >/dev/null 2>&1
 
@@ -814,7 +820,7 @@ mkdir -p "${SAVE_DIR}/torrent/incomplete"
 mkdir -p "${SAVE_DIR}/backups/vaultwarden"
 mkdir -p "${SAVE_DIR}/certificates"
 mkdir -p "${APP_DIR}/caddy/data" "${APP_DIR}/caddy/config"
-mkdir -p "${APP_DIR}/mihomo/ui"
+mkdir -p "${APP_DIR}/mihomo/ui" "${APP_DIR}/mihomo/providers"
 mkdir -p "${APP_DIR}/adguard/work" "${APP_DIR}/adguard/conf"
 mkdir -p "${APP_DIR}/vaultwarden"
 mkdir -p "${APP_DIR}/qbittorrent/config/qBittorrent"
@@ -843,6 +849,10 @@ if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
       -e "s|http://localhost:9090|https://${PROXY_DOMAIN}/api|g" \
       -e "s|localhost:9090|${PROXY_DOMAIN}/api|g" \
       -e "s|http://198.18.0.1:9090|https://${PROXY_DOMAIN}/api|g" {} + 2>/dev/null || true
+
+    echo "[*] Предварительная загрузка баз GeoIP и GeoSite..."
+    curl -sL "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat" -o "${APP_DIR}/mihomo/geoip.dat" || true
+    curl -sL "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat" -o "${APP_DIR}/mihomo/geosite.dat" || true
 fi
 
 USE_ALT_UI="false"
@@ -937,19 +947,17 @@ dns:
   upstream_dns:
     - 127.0.0.1:1053
   fallback_dns:
-    - https://dns.cloudflare.com/dns-query
-    - https://dns.google/dns-query
+    - 77.88.8.8
     - 1.1.1.1
-    - 8.8.8.8
   upstream_timeout: 2s
   bootstrap_dns:
+    - 77.88.8.8
     - 1.1.1.1
-    - 8.8.8.8
   upstream_mode: load_balance
-  cache_enabled: true
-  cache_size: 4194304
+  cache_enabled: false
+  cache_size: 0
   cache_ttl_min: 0
-  cache_ttl_max: 300
+  cache_ttl_max: 0
   cache_optimistic: false
   enable_dnssec: false
 filtering:
@@ -959,7 +967,11 @@ filtering:
   rewrites:${REWRITE_ENTRIES}
 filters: []
 whitelist_filters: []
-user_rules: []
+user_rules:
+  - '@@||whoer.net^\$important'
+  - '@@||aniliberty.top^\$important'
+  - '@@||anilibria.top^\$important'
+  - '@@||*.libria.fun^\$important'
 EOF
 
     echo "=== [4/6] Конфигурация Mihomo TUN ==="
@@ -983,20 +995,26 @@ dns:
   listen: 127.0.0.1:1053
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  respect-rules: true
   fake-ip-filter:
-    - "*.local"
-    - "*.duckdns.org"
-    - "+.local"
     - "+.lan"
+    - "+.duckdns.org"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "+.pool.ntp.org"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "detectportal.firefox.com"
   nameserver:
+    - 77.88.8.8
     - 1.1.1.1
-    - 8.8.8.8
 
 tun:
   enable: true
-  stack: system
+  stack: mixed
   auto-route: true
   auto-detect-interface: true
+  strict-route: false
   route-exclude-address:
     - "${LAN_SUBNET}"
     - "${ROUTER_GATEWAY}/32"
@@ -1024,27 +1042,48 @@ external-controller-cors:
     - "*"
   allow-private-network: true
 
+geodata-mode: true
+geo-auto-update: true
+geo-update-interval: 24
+geox-url:
+  geoip: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+
 dns:
   enable: true
   listen: 127.0.0.1:1053
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  respect-rules: true
   fake-ip-filter:
-    - "*.local"
-    - "*.duckdns.org"
-    - "+.local"
     - "+.lan"
-  nameserver:
-    - https://dns.cloudflare.com/dns-query
-    - https://dns.google/dns-query
+    - "+.duckdns.org"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "+.pool.ntp.org"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "detectportal.firefox.com"
+  default-nameserver:
+    - 77.88.8.8
     - 1.1.1.1
-    - 8.8.8.8
+  proxy-server-nameserver:
+    - 77.88.8.8
+    - 1.1.1.1
+  direct-nameserver:
+    - 77.88.8.8
+    - 77.88.8.1
+  nameserver:
+    - https://dns.google/dns-query
+    - https://cloudflare-dns.com/dns-query
 
 tun:
   enable: true
-  stack: system
+  stack: mixed
+  mtu: 1400
   auto-route: true
   auto-detect-interface: true
+  strict-route: false
   route-exclude-address:
     - "${LAN_SUBNET}"
     - "${ROUTER_GATEWAY}/32"
@@ -1056,29 +1095,37 @@ proxy-providers:
   my-sub:
     type: http
     url: "${SUB_URL}"
-    path: ./proxies.yaml
+    path: ./providers/proxies.yaml
     interval: 86400
     health-check:
       enable: true
-      url: http://www.gstatic.com/generate_204
+      url: https://www.gstatic.com/generate_204
       interval: 300
 
 proxy-groups:
   - name: PROXY
     type: select
+    proxies:
+      - AUTO
+      - DIRECT
     use:
       - my-sub
   - name: AUTO
     type: url-test
     use:
       - my-sub
-    url: http://www.gstatic.com/generate_204
+    url: https://www.gstatic.com/generate_204
     interval: 300
+    tolerance: 50
 
 rules:
+  # Блокировка QUIC (HTTP/3) для надежного форсирования TCP-туннеля
+  - AND,((NETWORK,udp),(DST-PORT,443)),REJECT
+
+  # Изоляция служебных маршрутов сервера и локальной сети
   - IP-CIDR,${ROUTER_GATEWAY}/32,DIRECT,no-resolve
   - IP-CIDR,${LOCAL_IP}/32,DIRECT,no-resolve
-  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,lan,DIRECT
   - DOMAIN-SUFFIX,duckdns.org,DIRECT
   - IP-CIDR,${LAN_SUBNET},DIRECT,no-resolve
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
@@ -1087,6 +1134,12 @@ rules:
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - GEOIP,private,DIRECT,no-resolve
   - GEOIP,lan,DIRECT,no-resolve
+
+  # Прямой доступ для зоны РФ (Госуслуги, банки, локальные сайты)
+  - GEOSITE,category-ru,DIRECT
+  - GEOIP,RU,DIRECT,no-resolve
+
+  # Весь остальной трафик идет через прокси
   - MATCH,PROXY
 EOF
     fi
