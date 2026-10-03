@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # =============================================================================
-# Project: IBLIAT (Homelab & Transparent Gateway Ultimate Edition)
-# Upgraded from uwu3.sh | Optimized for 2026 Linux Ecosystem & Docker 27+
+# Project: Homelab Appliance & Transparent Gateway (Enterprise Edition 2026)
+# Homelab Appliance & Gateway | Optimized for 2026 Linux Ecosystem & Docker 27+
 # Supported OS: Debian 12/13 (Trixie), Ubuntu 22.04/24.04/24.10, Arch Linux
 # Components: AdGuard Home, Mihomo TUN (Mixed), Vaultwarden (Alpine),
 #             Gitea (Git-сервер), Vaultwarden, Samba (WSDD2), qBittorrent, MeTube, Caddy, Watchtower
@@ -21,9 +21,7 @@ CLR_BLUE="\033[1;34m"
 CLR_CYAN="\033[1;36m"
 CLR_WHITE="\033[1;37m"
 
-BG_WHITE="\033[47m"
-BG_BLUE="\033[44m"
-BG_RED="\033[41m"
+CLR_MUTED="\033[0;36m"
 
 # Универсальный враппер для Docker Compose (совместимость Arch Linux, Debian, Ubuntu)
 dc() {
@@ -55,9 +53,9 @@ print_step_header() {
     local step_num="$1"
     local step_title="$2"
     echo ""
-    echo -e "${CLR_CYAN}╔══════════════════════════════════════════════════════════════════════════╗${CLR_RESET}"
-    printf "${CLR_CYAN}║${CLR_RESET} ${CLR_WHITE}${CLR_BOLD}[ЭТАП %-2s]${CLR_RESET} %-57s ${CLR_CYAN}║${CLR_RESET}\n" "${step_num}" "${step_title}"
-    echo -e "${CLR_CYAN}╚══════════════════════════════════════════════════════════════════════════╝${CLR_RESET}"
+    echo -e "${CLR_CYAN}╭────────────────────────────────────────────────────────────────────────────╮${CLR_RESET}"
+    printf "${CLR_CYAN}│${CLR_RESET} ${CLR_WHITE}${CLR_BOLD}[%-5s]${CLR_RESET} %-61s ${CLR_CYAN}│${CLR_RESET}\n" "${step_num}" "${step_title}"
+    echo -e "${CLR_CYAN}╰────────────────────────────────────────────────────────────────────────────╯${CLR_RESET}"
 }
 
 # Анимированный спиннер для фоновых задач
@@ -131,33 +129,17 @@ USER_GID=""
 # --- ТЕХНОЛОГИЧЕСКИЙ БАННЕР: СЕРВЕРНЫЙ СТЕК И СЕТЕВЫЕ НОДЫ ---
 show_banner() {
     clear 2>/dev/null || true
-    echo -e "${CLR_CYAN}         .────────────────.                                 .────────────────.${CLR_RESET}"
-    echo -e "${CLR_CYAN}         │ ${CLR_GREEN}🛡️  FIREWALL${CLR_CYAN}   │                                 │ ${CLR_BLUE}🌐  DNS / NET${CLR_CYAN}    │${CLR_RESET}"
-    echo -e "${CLR_CYAN}         │   SECURITY     │───────────────. .───────────────│   GATEWAY      │${CLR_RESET}"
-    echo -e "${CLR_CYAN}         '────────────────'               │ │               '────────────────'${CLR_RESET}"
-    echo -e "${CLR_CYAN}                                          ▼ ▼${CLR_RESET}"
-    echo -e "${CLR_WHITE}               ╔═════════════════════════════════════════════════╗${CLR_RESET}"
-    echo -e "${CLR_CYAN}   .──────────.${CLR_WHITE}║  ${CLR_CYAN}_____________________________________________  ${CLR_WHITE}║${CLR_CYAN}.──────────.${CLR_RESET}"
-    echo -e "${CLR_CYAN}   │ ${CLR_YELLOW}🔒 VAULT${CLR_CYAN} │${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_WHITE} ========================================= ${CLR_BLUE}|] ${CLR_WHITE}║│ ${CLR_BLUE}📦 DOCKER${CLR_CYAN} │${CLR_RESET}"
-    echo -e "${CLR_CYAN}   │ PASSWORDS│${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_GREEN}  ●  ●  ●${CLR_WHITE}   HOMELAB SERVER MATRIX  ${CLR_DIM}[2026]${CLR_BLUE} |] ${CLR_WHITE}║│CONTAINERS│${CLR_RESET}"
-    echo -e "${CLR_CYAN}   '──────────'${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_CYAN} ───────────────────────────────────────── ${CLR_BLUE}|] ${CLR_WHITE}║'──────────'${CLR_RESET}"
-    echo -e "${CLR_CYAN}        │      ${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_YELLOW} [■] [■] [■] [■]   NVMe STORAGE POOL     ${CLR_BLUE}|] ${CLR_WHITE}║      │${CLR_RESET}"
-    echo -e "${CLR_CYAN}        └─────>${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_CYAN} ───────────────────────────────────────── ${CLR_BLUE}|] ${CLR_WHITE}║<─────┘${CLR_RESET}"
-    echo -e "${CLR_WHITE}               ║ ${CLR_BLUE}[|${CLR_GREEN}  ●  ○  ●${CLR_WHITE}   TRANSPARENT TUN ROUTING   ${CLR_BLUE}|] ${CLR_WHITE}║${CLR_RESET}"
-    echo -e "${CLR_CYAN}        .─────>${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_CYAN} ───────────────────────────────────────── ${CLR_BLUE}|] ${CLR_WHITE}║<─────.${CLR_RESET}"
-    echo -e "${CLR_CYAN}        │      ${CLR_WHITE}║ ${CLR_BLUE}[|${CLR_YELLOW} (•) (•) (•) SYS STATUS: OPERATIONAL     ${CLR_BLUE}|] ${CLR_WHITE}║      │${CLR_RESET}"
-    echo -e "${CLR_CYAN}   .──────────.${CLR_WHITE}║  ${CLR_CYAN}─────────────────────────────────────────────  ${CLR_WHITE}║${CLR_CYAN}.──────────.${CLR_RESET}"
-    echo -e "${CLR_CYAN}   │ ${CLR_GREEN}💾 SAMBA${CLR_CYAN} │${CLR_WHITE}╚══════════════════════╦══╦══════════════════════╝│ ${CLR_GREEN}🚀 CADDY${CLR_CYAN} │${CLR_RESET}"
-    echo -e "${CLR_CYAN}   │ NAS SHARES│                             │  │                             │ HTTPS/SSL│${CLR_RESET}"
-    echo -e "${CLR_CYAN}   '──────────'                             ▼  ▼                             '──────────'${CLR_RESET}"
-    echo -e "${CLR_CYAN}                                     .────────────────.${CLR_RESET}"
-    echo -e "${CLR_CYAN}                                     │ ${CLR_WHITE}⚡ HIGH-SPEED  ${CLR_CYAN}│${CLR_RESET}"
-    echo -e "${CLR_CYAN}                                     │ ${CLR_GREEN}   SYSTEM CORE ${CLR_CYAN}│${CLR_RESET}"
-    echo -e "${CLR_CYAN}                                     '────────────────'${CLR_RESET}"
-    local BAR="                                                                      "
-    echo -e "${BG_WHITE}${CLR_WHITE}${BAR}${CLR_RESET}"
-    echo -e "${BG_BLUE}${CLR_WHITE}    ★  ★  ★   I B L I A T   ::   H O M E L A B   U L T I M A T E   ★  ★  ★    ${CLR_RESET}"
-    echo -e "${BG_RED}${CLR_WHITE}${BAR}${CLR_RESET}"
+    echo -e "${CLR_CYAN}┌────────────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET} ${CLR_WHITE}${CLR_BOLD}                 HOMELAB APPLIANCE & TRANSPARENT GATEWAY                    ${CLR_RESET}${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}├────────────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_BLUE}┌──────────────┐${CLR_RESET}   ${CLR_GREEN}┌──────────────┐${CLR_RESET}   ${CLR_YELLOW}┌──────────────┐${CLR_RESET}   ${CLR_WHITE}┌──────────────┐${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_BLUE}│ AdGuard Home │${CLR_RESET}   ${CLR_GREEN}│  Mihomo TUN  │${CLR_RESET}   ${CLR_YELLOW}│ Caddy Proxy  │${CLR_RESET}   ${CLR_WHITE}│ Encrypted NAS│${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_BLUE}└──────┬───────┘${CLR_RESET}   ${CLR_GREEN}└──────┬───────┘${CLR_RESET}   ${CLR_YELLOW}└──────┬───────┘${CLR_RESET}   ${CLR_WHITE}└──────┬───────┘${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}         ${CLR_DIM}│                   │                  │                  │${CLR_RESET}         ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_CYAN}┌──────┴───────────────────┴──────────────────┴──────────────────┴──────┐${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}                   ${CLR_WHITE}${CLR_BOLD}Docker Services & Self-Hosted Platform${CLR_RESET}                  ${CLR_CYAN}│${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}│${CLR_RESET}  ${CLR_CYAN}└───────────────────────────────────────────────────────────────────────┘${CLR_RESET}  ${CLR_CYAN}│${CLR_RESET}"
+    echo -e "${CLR_CYAN}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
     echo ""
     echo -e "  ${CLR_CYAN}Автоматизированный комплекс сервисов, прозрачного шлюза и шифрования${CLR_RESET}"
     echo -e "  ${CLR_DIM}Поддержка: Debian 12/13, Ubuntu 22.04/24.04/24.10, Arch Linux | 2026${CLR_RESET}"
@@ -170,7 +152,7 @@ show_banner() {
 check_privileges() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then
         log_err "Скрипт должен быть запущен с правами root (sudo)!"
-        echo -e "      ${CLR_WHITE}Запуск: sudo ./ibliat.sh${CLR_RESET}"
+        echo -e "      ${CLR_WHITE}Запуск: sudo $0${CLR_RESET}"
         exit 1
     fi
     [ -c /dev/tty ] && exec < /dev/tty || true
@@ -243,14 +225,22 @@ sync_time() {
 # 1. УСТАНОВКА ЗАВИСИМОСТЕЙ И ОФИЦИАЛЬНОГО DOCKER CE
 # =============================================================================
 install_pkgs() {
-    print_step_header "1/9" "УСТАНОВКА ЗАВИСИМОСТЕЙ И СТЕКА DOCKER"
+    print_step_header "01/10" "УСТАНОВКА ЗАВИСИМОСТЕЙ И СТЕКА DOCKER"
 
     if [ "${DISTRO_FAMILY}" = "arch" ]; then
-        run_spin "Синхронизация репозиториев и установка утилит Arch" \
-            pacman -Syu --noconfirm --needed \
-                python python-bcrypt iproute2 cryptsetup btrfs-progs ntfs-3g util-linux \
-                curl openssl ca-certificates jq iptables unzip tar sqlite \
-                docker docker-compose argon2 iputils acl
+        local ARCH_PKGS=(python python-bcrypt iproute2 cryptsetup btrfs-progs ntfs-3g util-linux \
+                         curl openssl ca-certificates jq iptables unzip tar sqlite \
+                         docker docker-compose argon2 iputils acl)
+        local MISSING_PKGS=()
+        for p in "${ARCH_PKGS[@]}"; do
+            pacman -Q "$p" >/dev/null 2>&1 || MISSING_PKGS+=("$p")
+        done
+        if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
+            log_ok "Все системные пакеты Arch Linux уже установлены (пропуск)"
+        else
+            run_spin "Установка недостающих утилит Arch: ${MISSING_PKGS[*]}" \
+                pacman -S --noconfirm --needed "${MISSING_PKGS[@]}"
+        fi
     elif [ "${DISTRO_FAMILY}" = "debian" ]; then
         export DEBIAN_FRONTEND=noninteractive
         run_spin "Обновление индексов пакетов APT" bash -c "apt-get update -o Acquire::Check-Valid-Until=false -y || apt-get update -y"
@@ -287,11 +277,10 @@ install_pkgs() {
         fi
     fi
 
-    # Безопасное слияние локальных зеркал Docker Hub (для РФ) без затирания daemon.json
-    log_info "Настройка локальных зеркал Docker Hub (Timeweb, Cloud.ru, Huecker)..."
-    mkdir -p /etc/docker
+    # Умная проверка и настройка локальных зеркал Docker Hub (для РФ)
+    local DAEMON_CHANGED=0
     python3 -c "
-import json, os
+import json, os, sys
 path = '/etc/docker/daemon.json'
 data = {}
 if os.path.exists(path):
@@ -306,15 +295,26 @@ target_mirrors = [
     'https://dockerhub.cloud.ru',
     'https://huecker.io'
 ]
+modified = False
 for m in target_mirrors:
     if m not in mirrors:
         mirrors.append(m)
-data['registry-mirrors'] = mirrors
-with open(path, 'w') as f:
-    json.dump(data, f, indent=2)
-" 2>/dev/null || true
-
-    run_spin "Перезапуск и активация службы Docker" bash -c "systemctl daemon-reload && systemctl enable --now docker && systemctl restart docker 2>/dev/null || true"
+        modified = True
+if modified:
+    os.makedirs('/etc/docker', exist_ok=True)
+    data['registry-mirrors'] = mirrors
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    sys.exit(1)
+sys.exit(0)
+" 2>/dev/null && DAEMON_CHANGED=0 || DAEMON_CHANGED=1
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        run_spin "Активация и запуск службы Docker" bash -c "systemctl daemon-reload && systemctl enable --now docker"
+    elif [ "${DAEMON_CHANGED}" -eq 1 ]; then
+        run_spin "Обновление конфигурации и перезапуск Docker (добавлены зеркала)" bash -c "systemctl daemon-reload && systemctl restart docker"
+    else
+        log_ok "Служба Docker активна, зеркала Docker Hub уже настроены (перезапуск не требуется)"
+    fi
 
     if command -v docker >/dev/null 2>&1; then
         docker stop mihomo >/dev/null 2>&1 || true
@@ -338,7 +338,7 @@ with open(path, 'w') as f:
 # 2. ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ СЕТИ
 # =============================================================================
 detect_network() {
-    print_step_header "2/9" "ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ СЕТЕВОГО ОКРУЖЕНИЯ"
+    print_step_header "02/10" "ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ СЕТЕВОГО ОКРУЖЕНИЯ"
 
     PHYS_IFACE=$( (ip -o -4 route show default 2>/dev/null | awk '{print $5}' | grep -vE '^(Meta|tun|docker|br-|veth)' | head -n1) || true )
     if [ -z "${PHYS_IFACE}" ]; then
@@ -431,7 +431,7 @@ select_disk_device() {
 # 4. ДИАЛОГ КОНФИГУРАЦИИ (МАКСИМУМ АВТОМАТИЗАЦИИ)
 # =============================================================================
 prompt_configuration() {
-    print_step_header "3/9" "КОНФИГУРАЦИЯ И ВЫБОР РЕЖИМА УСТАНОВКИ"
+    print_step_header "03/10" "КОНФИГУРАЦИЯ И ВЫБОР РЕЖИМА УСТАНОВКИ"
 
     echo -e "  ${CLR_WHITE}Выберите вариант развертывания:${CLR_RESET}"
     echo -e "    ${CLR_GREEN}1) Экспресс-установка${CLR_RESET} (Всё включено, авто-настройка, *.lan) ${CLR_DIM}[Enter]${CLR_RESET}"
@@ -889,7 +889,7 @@ EOF_UNLOCK
 # 5. ХЭШИРОВАНИЕ И СЕТЕВОЙ СТЕК
 # =============================================================================
 setup_credentials() {
-    print_step_header "4/9" "ГЕНЕРАЦИЯ КРИПТОГРАФИЧЕСКИХ ХЭШЕЙ"
+    print_step_header "04/10" "ГЕНЕРАЦИЯ КРИПТОГРАФИЧЕСКИХ ХЭШЕЙ"
 
     modprobe tun 2>/dev/null || true
     mkdir -p /etc/modules-load.d
@@ -946,7 +946,7 @@ except Exception:
 }
 
 setup_gateway_networking() {
-    print_step_header "5/9" "МАРШРУТИЗАЦИЯ, IPTABLES И ЗАЩИТА ОТ ПЕТЕЛЬ"
+    print_step_header "05/10" "МАРШРУТИЗАЦИЯ, IPTABLES И ЗАЩИТА ОТ ПЕТЕЛЬ"
 
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
         log_info "Освобождение порта 53 (отключение DNSStubListener в systemd-resolved)..."
@@ -1065,7 +1065,7 @@ EOF_WD_TMR
 # 6. СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW
 # =============================================================================
 setup_directories() {
-    print_step_header "6/9" "СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW"
+    print_step_header "06/10" "СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW"
 
     usermod -aG docker "${TARGET_USER}" 2>/dev/null || true
 
@@ -1084,7 +1084,10 @@ setup_directories() {
 
     if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
         mkdir -p "${APP_DIR}/qbittorrent/config/qBittorrent" "${APP_DIR}/qbittorrent/vuetorrent"
-        log_info "Загрузка и распаковка веб-интерфейса VueTorrent..."
+        if [ -f "${APP_DIR}/qbittorrent/vuetorrent/index.html" ] && [ -d "${APP_DIR}/qbittorrent/vuetorrent/assets" ]; then
+            log_ok "Веб-интерфейс VueTorrent уже установлен (пропуск загрузки)"
+        else
+            log_info "Загрузка и распаковка веб-интерфейса VueTorrent..."
         python3 -c "
 import urllib.request, zipfile, os
 
@@ -1125,6 +1128,7 @@ if os.path.isfile(zip_p) and os.path.getsize(zip_p) > 50000:
     except Exception:
         pass
 " 2>/dev/null || true
+        fi
         chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/qbittorrent" 2>/dev/null || true
         log_info "Генерация конфигурации qBittorrent с VueTorrent и мастер-паролем..."
         local QBIT_HASH
@@ -1220,7 +1224,7 @@ EOF_QBIT_CONF
 # 7. КОНФИГУРАЦИЯ ADGUARD И MIHOMO (ПОЛНАЯ АВТОМАТИЗАЦИЯ)
 # =============================================================================
 configure_gateway_services() {
-    print_step_header "7/9" "ГЕНЕРАЦИЯ КОНФИГУРАЦИЙ ADGUARD HOME И MIHOMO TUN"
+    print_step_header "07/10" "ГЕНЕРАЦИЯ КОНФИГУРАЦИЙ ADGUARD HOME И MIHOMO TUN"
 
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
         log_info "Формирование DNS-переопределений и фильтров AdGuard Home..."
@@ -1489,7 +1493,7 @@ EOF_MIHOMO
 # 8. CADDYFILE И DOCKER COMPOSE СТЕК (ИСПРАВЛЕННЫЙ И ОПТИМИЗИРОВАННЫЙ)
 # =============================================================================
 configure_caddy_and_compose() {
-    print_step_header "8/9" "ГЕНЕРАЦИЯ CADDYFILE И DOCKER-COMPOSE.YML"
+    print_step_header "08/10" "ГЕНЕРАЦИЯ CADDYFILE И DOCKER-COMPOSE.YML"
     local ADMIN_USER_LOWER
     ADMIN_USER_LOWER=$(echo "${ADMIN_USER}" | tr "[:upper:]" "[:lower:]")
     local SAMBA_PASS_COMPOSE="${SAMBA_PASS//\$/\$\$}"
@@ -1829,7 +1833,7 @@ ExecStartPre=/bin/sh -c 'iptables -t nat -C POSTROUTING -o \"${DEFAULT_IFACE}\" 
 
     cat <<EOF_HOMELAB_SVC > /etc/systemd/system/homelab.service
 [Unit]
-Description=Homelab Docker Compose Stack (IBLIAT)
+Description=Homelab Docker Compose Stack
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -1857,7 +1861,7 @@ EOF_HOMELAB_SVC
 # 9. РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТОМАТИЗАЦИЯ ПОСТ-УСТАНОВКИ
 # =============================================================================
 setup_backups_and_start() {
-    print_step_header "9/9" "РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТО-ИНИЦИАЛИЗАЦИЯ"
+    print_step_header "09/10" "РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТО-ИНИЦИАЛИЗАЦИЯ"
 
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
         log_info "Настройка автоматического горячего бэкапа Vaultwarden (SQLite3)..."
@@ -1975,73 +1979,9 @@ EOF_BKP_TMR
         done
     fi
 
-        local SAMBA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}"
-    local CA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}\\certificates\\caddy-root.crt"
-
-    # ФИНАЛЬНЫЙ СТИЛЬНЫЙ ДАШБОРД
-    echo ""
-    echo -e "${CLR_GREEN}╔══════════════════════════════════════════════════════════════════════════╗${CLR_RESET}"
-    echo -e "${CLR_GREEN}║${CLR_RESET}   ${CLR_WHITE}${CLR_BOLD}★  УСТАНОВКА И АВТОМАТИЗАЦИЯ IBLIAT УСПЕШНО ЗАВЕРШЕНА!  ★${CLR_RESET}          ${CLR_GREEN}║${CLR_RESET}"
-    echo -e "${CLR_GREEN}╚══════════════════════════════════════════════════════════════════════════╝${CLR_RESET}"
-    echo ""
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] ВЕБ-СЕРВИСЫ (HTTPS):${CLR_RESET}"
-    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
-    echo -e "      ${CLR_WHITE}• Vaultwarden:${CLR_RESET}      ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET} (для первого входа нажмите 'Создать аккаунт')"
-    echo -e "      ${CLR_WHITE}• Панель админа:${CLR_RESET}    ${CLR_CYAN}https://${VAULT_DOMAIN}/admin${CLR_RESET} (вход по токену/паролю админа)"
-    fi
-    if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
-    echo -e "      ${CLR_WHITE}• Gitea (Git):${CLR_RESET}      ${CLR_CYAN}https://${GITEA_DOMAIN}${CLR_RESET} (SSH порт: 2222)"
-    fi
-    if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
-    echo -e "      ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET} ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET} ${CLR_DIM}(или http://${LOCAL_IP}:8080)${CLR_RESET}"
-    fi
-    if [[ "${ENABLE_METUBE}" =~ ^[Yy]$ ]]; then
-    echo -e "      ${CLR_WHITE}• MeTube (yt-dlp):${CLR_RESET}    ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET} ${CLR_DIM}(или http://${LOCAL_IP}:8081)${CLR_RESET}"
-    fi
-    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-    echo -e "      ${CLR_WHITE}• AdGuard Home:${CLR_RESET}     ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}• Mihomo UI:${CLR_RESET}        ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
-        fi
-    echo ""
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] УЧЕТНЫЕ ДАННЫЕ (АВТОМАТИЧЕСКИ ПРИМЕНЕНЫ КО ВСЕМ СЕРВИСАМ):${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}• Имя пользователя:${CLR_RESET} ${CLR_GREEN}${ADMIN_USER}${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}• Мастер-пароль:${CLR_RESET}    ${CLR_GREEN}${MASTER_PASS}${CLR_RESET}"
-    [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && echo -e "      ${CLR_WHITE}• Токен /admin:${CLR_RESET}     ${CLR_YELLOW}${VAULT_ADMIN_TOKEN}${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}• Секрет Mihomo:${CLR_RESET}    ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
-    echo ""
-    if [ "$SSL_MODE" = "1" ]; then
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] ДОВЕРИЕ СЕРТИФИКАТАМ (CA ROOT.CRT):${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}Файл сертификата лежит в:${CLR_RESET} ${CLR_YELLOW}${SAVE_DIR}/certificates/caddy-root.crt${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}Доступен по сети через SMB:${CLR_RESET} ${CLR_YELLOW}${CA_PATH}${CLR_RESET}"
-    echo -e "      ${CLR_DIM}(Установите в 'Доверенные корневые центры сертификации' на ПК/телефоне для зелёного замка)${CLR_RESET}"
-    echo ""
-    fi
-    if [[ "${ENABLE_SAMBA}" =~ ^[Yy]$ ]]; then
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] СЕТЕВОЕ ХРАНИЛИЩЕ SAMBA (WINDOWS / MAC / LINUX):${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}Сетевой путь:${CLR_RESET}      ${CLR_GREEN}${SAMBA_PATH}${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}Логин:${CLR_RESET}             ${ADMIN_USER}"
-    echo -e "      ${CLR_WHITE}Пароль:${CLR_RESET}            ${SAMBA_PASS}"
-    echo ""
-    fi
-    if [ "$STORAGE_MODE" != "1" ]; then
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] ДИСКОВОЕ ХРАНИЛИЩЕ:${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}Точка монтирования:${CLR_RESET} ${MOUNT_ROOT}"
-    echo -e "      ${CLR_WHITE}Каталог данных:${CLR_RESET}     ${SAVE_DIR}"
-    [ "$STORAGE_MODE" = "4" ] || [ "$STORAGE_MODE" = "5" ] && echo -e "      ${CLR_WHITE}Ручная разблокировка:${CLR_RESET} sudo homelab-unlock"
-    echo ""
-    fi
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}[+] ЧТО ДЕЛАТЬ С РОУТЕРОМ (1 ПРОСТОЕ ДЕЙСТВИЕ ДЛЯ ВСЕГО ДОМА):${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}В настройках DHCP роутера укажите DNS сервер:${CLR_RESET} ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
-    echo -e "      ${CLR_WHITE}И (опционально для шлюза) Основной шлюз:${CLR_RESET}    ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
-    echo -e "      ${CLR_DIM}После этого на всех смартфонах, ТВ и ПК сразу заработает блокировка рекламы,${CLR_RESET}"
-    echo -e "      ${CLR_DIM}доступ к *.lan сайтам и автоматический обход замедлений без установки программ!${CLR_RESET}"
-    echo -e "${CLR_GREEN}══════════════════════════════════════════════════════════════════════════${CLR_RESET}"
-    echo ""
+    log_ok "Сервисы комплекса успешно запущены и готовы к работе"
+    log_ok "Службы автозапуска и горячего резервного копирования активированы"
 }
-
-# =============================================================================
-
-# =============================================================================
 # 10. АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И САМОПРОВЕРКА СИСТЕМЫ
 # =============================================================================
 diagnose_and_verify_system() {
@@ -2055,7 +1995,7 @@ diagnose_and_verify_system() {
     mkdir -p /opt/homelab
     cat <<EOF_DIAG > "${DIAG_LOG}"
 =============================================================================
-                  ОТЧЕТ ДИАГНОСТИКИ СИСТЕМЫ IBLIAT
+                  ОТЧЕТ ДИАГНОСТИКИ СИСТЕМЫ HOMELAB
                   Дата и время: $(date '+%Y-%m-%d %H:%M:%S %Z')
 =============================================================================
 Дистрибутив:       ${PRETTY_NAME:-Linux} ($(uname -r))
@@ -2184,6 +2124,105 @@ EOF_SYS_INFO
     fi
 }
 
+# =============================================================================
+# 11. ФИНАЛЬНЫЙ СЕРВЕРНЫЙ ДАШБОРД И СВОДКА ДАННЫХ
+# =============================================================================
+show_summary_dashboard() {
+    local SAMBA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}"
+    local CA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}\\certificates\\caddy-root.crt"
+
+    echo ""
+    echo -e "${CLR_GREEN}╭──────────────────────────────────────────────────────────────────────────────╮${CLR_RESET}"
+    echo -e "${CLR_GREEN}│${CLR_RESET}  ${CLR_GREEN}✔${CLR_RESET}  ${CLR_WHITE}${CLR_BOLD}HOMELAB APPLIANCE & TRANSPARENT GATEWAY УСПЕШНО РАЗВЕРНУТ${CLR_RESET}              ${CLR_GREEN}│${CLR_RESET}"
+    echo -e "${CLR_GREEN}╰──────────────────────────────────────────────────────────────────────────────╯${CLR_RESET}"
+    echo ""
+
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ СЕТЕВОЙ ШЛЮЗ И МАРШРУТИЗАЦИЯ ─────────────────────────────────────────────┐${CLR_RESET}"
+    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET} ${CLR_MUTED}(DNS порт 53)${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Mihomo Smart Routing UI:${CLR_RESET}      ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Секрет панели управления:${CLR_RESET}     ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
+    else
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_MUTED}• Прозрачный шлюз отключен в конфигурации${CLR_RESET}"
+    fi
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ВЕБ-СЕРВИСЫ И ОБЛАЧНЫЕ ПРИЛОЖЕНИЯ (HTTPS) ────────────────────────────────┐${CLR_RESET}"
+    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Vaultwarden (Пароли):${CLR_RESET}         ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(первый вход: Создать аккаунт)${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Панель администратора:${CLR_RESET}        ${CLR_CYAN}https://${VAULT_DOMAIN}/admin${CLR_RESET}"
+    fi
+    if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Gitea (Git-платформа):${CLR_RESET}        ${CLR_CYAN}https://${GITEA_DOMAIN}${CLR_RESET} ${CLR_MUTED}(SSH порт: 2222)${CLR_RESET}"
+    fi
+    if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET}     ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8080)${CLR_RESET}"
+    fi
+    if [[ "${ENABLE_METUBE}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• MeTube (Медиа-загрузчик):${CLR_RESET}     ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8081)${CLR_RESET}"
+    fi
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ЕДИНЫЕ УЧЕТНЫЕ ДАННЫЕ ────────────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Имя администратора:${CLR_RESET}           ${CLR_GREEN}${ADMIN_USER}${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Единый мастер-пароль:${CLR_RESET}         ${CLR_GREEN}${MASTER_PASS}${CLR_RESET}"
+    if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Токен Vaultwarden /admin:${CLR_RESET}     ${CLR_YELLOW}${VAULT_ADMIN_TOKEN}${CLR_RESET}"
+    fi
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+
+    if [ "$SSL_MODE" = "1" ]; then
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ДОВЕРИЕ СЕРТИФИКАТАМ (ROOT CA CERTIFICATE) ──────────────────────────────┐${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сертификат CA на сервере:${CLR_RESET}     ${CLR_YELLOW}${SAVE_DIR}/certificates/caddy-root.crt${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сетевой путь (SMB):${CLR_RESET}           ${CLR_YELLOW}\\\\${LOCAL_IP}\\${SHARE_NAME}\\certificates\\caddy-root.crt${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_MUTED}(Установите в 'Доверенные корневые центры' на ПК/смартфоне для зелёного замка)${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo ""
+    fi
+
+    if [[ "${ENABLE_SAMBA}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ СЕТЕВОЕ ХРАНИЛИЩЕ SAMBA (WINDOWS / MAC / LINUX) ──────────────────────────┐${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сетевой адрес шары:${CLR_RESET}           ${CLR_GREEN}\\\\${LOCAL_IP}\\${SHARE_NAME}${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Логин / Пароль:${CLR_RESET}               ${ADMIN_USER} / ${SAMBA_PASS}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo ""
+    fi
+
+    if [ "$STORAGE_MODE" != "1" ]; then
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ДИСКОВОЕ ХРАНИЛИЩЕ И РАЗДЕЛЫ ─────────────────────────────────────────────┐${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Точка монтирования:${CLR_RESET}           ${MOUNT_ROOT}"
+        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Каталог данных:${CLR_RESET}               ${SAVE_DIR}"
+        if [ "$STORAGE_MODE" = "4" ] || [ "$STORAGE_MODE" = "5" ]; then
+            echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Ручная разблокировка LUKS:${CLR_RESET}    sudo homelab-unlock"
+        fi
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo ""
+    fi
+
+    echo -e "  ${CLR_GREEN}${CLR_BOLD}┌─ НАСТРОЙКА ДОМАШНЕГО РОУТЕРА (1 ДЕЙСТВИЕ ДЛЯ ВСЕХ УСТРОЙСТВ) ──────────────┐${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}В параметрах DHCP вашего роутера укажите:${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}• Первичный DNS-сервер:${CLR_RESET}         ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
+    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+        echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}• Основной шлюз (Gateway):${CLR_RESET}      ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
+    fi
+    echo -e "  ${CLR_GREEN}│${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_MUTED}После этого все смартфоны, ПК и Smart TV в сети сразу получат фильтрацию${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_MUTED}рекламы, доступ к локальным *.lan доменам и интеллектуальную маршрутизацию!${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ БЫСТРЫЕ КОМАНДЫ УПРАВЛЕНИЯ ───────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Статус контейнеров:${CLR_RESET}           ${CLR_CYAN}dc ps${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Просмотр логов в реалтайме:${CLR_RESET}   ${CLR_CYAN}dc logs -f [сервис]${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Перезапуск всего комплекса:${CLR_RESET}   ${CLR_CYAN}sudo systemctl restart homelab.service${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Отчет диагностики:${CLR_RESET}            ${CLR_CYAN}cat /opt/homelab/diagnostic_report.log${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+}
+
 # ТОЧКА ВХОДА
 # =============================================================================
 main() {
@@ -2202,6 +2241,7 @@ main() {
     configure_caddy_and_compose
     setup_backups_and_start
     diagnose_and_verify_system
+    show_summary_dashboard
 }
 
 main "$@"
