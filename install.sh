@@ -48,24 +48,26 @@ log_ok()    { echo -e "  ${TAG_OK} ${CLR_GREEN}$*${CLR_RESET}"; }
 log_warn()  { echo -e "  ${TAG_WARN} ${CLR_YELLOW}$*${CLR_RESET}"; }
 log_err()   { echo -e "  ${TAG_ERR} ${CLR_RED}$*${CLR_RESET}" >&2; }
 
-# Красивый вывод этапа
+# Красивый вывод этапа (адаптивный для мобильных и десктопных терминалов)
 print_step_header() {
     local step_num="$1"
     local step_title="$2"
     echo ""
-    echo -e "${CLR_CYAN}╭────────────────────────────────────────────────────────────────────────────╮${CLR_RESET}"
-    printf "${CLR_CYAN}│${CLR_RESET} ${CLR_WHITE}${CLR_BOLD}[%-5s]${CLR_RESET} %-61s ${CLR_CYAN}│${CLR_RESET}\n" "${step_num}" "${step_title}"
-    echo -e "${CLR_CYAN}╰────────────────────────────────────────────────────────────────────────────╯${CLR_RESET}"
+    echo -e "${CLR_CYAN}╭── ${CLR_WHITE}${CLR_BOLD}[${step_num}]${CLR_RESET} ${CLR_CYAN}${CLR_BOLD}${step_title}${CLR_RESET}"
+    echo -e "${CLR_CYAN}╰─────────────────────────────────────────────${CLR_RESET}"
 }
 
-# Анимированный спиннер для фоновых задач
+# Анимированный спиннер для фоновых задач (защищен от переноса строк на мобильных экранах)
 run_spin() {
-    local msg="$1"
+    local full_msg="$1"
     shift
+    local max_len=40
+    local disp_msg="${full_msg:0:$max_len}"
+    [ ${#full_msg} -gt $max_len ] && disp_msg="${disp_msg}..."
+
     local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local log_tmp
     log_tmp=$(mktemp)
-
     "$@" >"${log_tmp}" 2>&1 &
     local pid=$!
     local i=0
@@ -73,7 +75,7 @@ run_spin() {
     # Скрыть курсор
     printf "\033[?25l"
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\r  ${CLR_CYAN}${spin[i]}${CLR_RESET} ${CLR_WHITE}%s...${CLR_RESET}" "${msg}"
+        printf "\r\033[2K  ${CLR_CYAN}${spin[i]}${CLR_RESET} ${CLR_WHITE}%-43s${CLR_RESET}" "${disp_msg}"
         i=$(( (i + 1) % 10 ))
         sleep 0.08
     done
@@ -84,12 +86,12 @@ run_spin() {
     printf "\033[?25h"
 
     if [ $exit_code -eq 0 ]; then
-        printf "\r  ${CLR_GREEN}✔${CLR_RESET} ${CLR_WHITE}%-50s${CLR_RESET} ${CLR_GREEN}[ГОТОВО]${CLR_RESET}\n" "${msg}"
+        printf "\r\033[2K  ${CLR_GREEN}✔${CLR_RESET} ${CLR_WHITE}%-45s${CLR_RESET} ${CLR_GREEN}[ГОТОВО]${CLR_RESET}\n" "${disp_msg}"
         rm -f "${log_tmp}"
         return 0
     else
-        printf "\r  ${CLR_RED}✖${CLR_RESET} ${CLR_WHITE}%-50s${CLR_RESET} ${CLR_RED}[ОШИБКА (код %d)]${CLR_RESET}\n" "${msg}" "${exit_code}"
-        echo -e "${CLR_RED}--- Журнал ошибки (${msg}): ---${CLR_RESET}" >&2
+        printf "\r\033[2K  ${CLR_RED}✖${CLR_RESET} ${CLR_WHITE}%-45s${CLR_RESET} ${CLR_RED}[СБОЙ]${CLR_RESET}\n" "${disp_msg}"
+        echo -e "${CLR_RED}--- Журнал ошибки (${full_msg}): ---${CLR_RESET}" >&2
         tail -n 25 "${log_tmp}" >&2
         echo -e "${CLR_RED}-----------------------------------${CLR_RESET}" >&2
         rm -f "${log_tmp}"
@@ -217,7 +219,7 @@ sync_time() {
 
     if systemctl is-active --quiet systemd-timesyncd 2>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q 'systemd-timesyncd'; then
         systemctl unmask systemd-timesyncd 2>/dev/null || true
-        systemctl enable --now systemd-timesyncd 2>/dev/null || true
+        systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
     fi
 }
 
@@ -238,7 +240,7 @@ install_pkgs() {
         if [ ${#MISSING_PKGS[@]} -eq 0 ]; then
             log_ok "Все системные пакеты Arch Linux уже установлены (пропуск)"
         else
-            run_spin "Установка недостающих утилит Arch: ${MISSING_PKGS[*]}" \
+            run_spin "Установка пакетов Arch (${#MISSING_PKGS[@]} шт.)" \
                 pacman -S --noconfirm --needed "${MISSING_PKGS[@]}"
         fi
     elif [ "${DISTRO_FAMILY}" = "debian" ]; then
@@ -309,9 +311,9 @@ if modified:
 sys.exit(0)
 " 2>/dev/null && DAEMON_CHANGED=0 || DAEMON_CHANGED=1
     if ! systemctl is-active --quiet docker 2>/dev/null; then
-        run_spin "Активация и запуск службы Docker" bash -c "systemctl daemon-reload && systemctl enable --now docker"
+        run_spin "Активация и запуск службы Docker" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl enable --now docker >/dev/null 2>&1 || true"
     elif [ "${DAEMON_CHANGED}" -eq 1 ]; then
-        run_spin "Обновление конфигурации и перезапуск Docker (добавлены зеркала)" bash -c "systemctl daemon-reload && systemctl restart docker"
+        run_spin "Обновление конфигурации и перезапуск Docker (добавлены зеркала)" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl restart docker"
     else
         log_ok "Служба Docker активна, зеркала Docker Hub уже настроены (перезапуск не требуется)"
     fi
@@ -488,7 +490,7 @@ prompt_configuration() {
         rm -f /usr/local/bin/gateway-watchdog.sh /usr/local/bin/homelab-unlock
         rm -f /etc/systemd/system/homelab.service /etc/systemd/system/network-gateway-watchdog.* /etc/systemd/system/vaultwarden-backup.*
         rm -f /opt/homelab/diagnostic_report.log /home/${TARGET_USER}/diagnostic_report.log 2>/dev/null || true
-        systemctl daemon-reload
+        systemctl daemon-reload >/dev/null 2>&1 || true
 
         log_info "Восстановление стандартных записей в /etc/hosts..."
         sed -i '/\.lan$/d' /etc/hosts 2>/dev/null || true
@@ -1042,8 +1044,8 @@ AccuracySec=5s
 WantedBy=timers.target
 EOF_WD_TMR
 
-        systemctl daemon-reload
-        systemctl enable --now network-gateway-watchdog.timer
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable --now network-gateway-watchdog.timer >/dev/null 2>&1 || true
     fi
 
     log_info "Регистрация локальных доменов в /etc/hosts..."
@@ -1852,8 +1854,8 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF_HOMELAB_SVC
 
-    systemctl daemon-reload
-    systemctl enable homelab.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable homelab.service >/dev/null 2>&1 || true
     log_ok "Caddyfile, docker-compose.yml и homelab.service успешно сформированы"
 }
 
@@ -1917,8 +1919,8 @@ Persistent=true
 WantedBy=timers.target
 EOF_BKP_TMR
 
-        systemctl daemon-reload
-        systemctl enable --now vaultwarden-backup.timer
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable --now vaultwarden-backup.timer >/dev/null 2>&1 || true
     fi
 
     cd "${APP_DIR}"
@@ -1928,15 +1930,9 @@ EOF_BKP_TMR
         ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
     fi
 
-    log_info "Загрузка Docker-образов стека (может занять 1-2 минуты)..."
-    dc pull || true
+    run_spin "Загрузка Docker-образов стека" bash -c "dc pull -q 2>/dev/null || dc pull"
 
-    log_info "Запуск контейнеров стека (Docker Compose)..."
-    if ! dc up -d; then
-        log_warn "Первичный запуск docker compose вернул предупреждение. Повторная попытка..."
-        sleep 2
-        dc up -d || true
-    fi
+    run_spin "Запуск контейнеров стека (Docker Compose)" bash -c "dc up -d --quiet-pull 2>/dev/null || dc up -d"
 
     # АВТОМАТИЗАЦИЯ: Пре-создание учетной записи администратора в Gitea (без ручного визарда!)
     if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
@@ -2129,97 +2125,94 @@ EOF_SYS_INFO
 # =============================================================================
 show_summary_dashboard() {
     local SAMBA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}"
-    local CA_PATH="\\\\${LOCAL_IP}\\${SHARE_NAME}\\certificates\\caddy-root.crt"
 
     echo ""
-    echo -e "${CLR_GREEN}╭──────────────────────────────────────────────────────────────────────────────╮${CLR_RESET}"
-    echo -e "${CLR_GREEN}│${CLR_RESET}  ${CLR_GREEN}✔${CLR_RESET}  ${CLR_WHITE}${CLR_BOLD}HOMELAB APPLIANCE & TRANSPARENT GATEWAY УСПЕШНО РАЗВЕРНУТ${CLR_RESET}              ${CLR_GREEN}│${CLR_RESET}"
-    echo -e "${CLR_GREEN}╰──────────────────────────────────────────────────────────────────────────────╯${CLR_RESET}"
+    echo -e "${CLR_GREEN}╭── ${CLR_WHITE}${CLR_BOLD}HOMELAB APPLIANCE & TRANSPARENT GATEWAY УСПЕШНО РАЗВЕРНУТ${CLR_RESET}"
+    echo -e "${CLR_GREEN}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ СЕТЕВОЙ ШЛЮЗ И МАРШРУТИЗАЦИЯ ─────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── СЕТЕВОЙ ШЛЮЗ И МАРШРУТИЗАЦИЯ ────────────────────────────${CLR_RESET}"
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET} ${CLR_MUTED}(DNS порт 53)${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Mihomo Smart Routing UI:${CLR_RESET}      ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Секрет панели управления:${CLR_RESET}     ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET} ${CLR_MUTED}(DNS порт 53)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Mihomo Smart Routing UI:${CLR_RESET}      ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Секрет панели управления:${CLR_RESET}     ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
     else
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_MUTED}• Прозрачный шлюз отключен в конфигурации${CLR_RESET}"
+        echo -e "  ${CLR_MUTED}• Прозрачный шлюз отключен в конфигурации${CLR_RESET}"
     fi
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ВЕБ-СЕРВИСЫ И ОБЛАЧНЫЕ ПРИЛОЖЕНИЯ (HTTPS) ────────────────────────────────┐${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ВЕБ-СЕРВИСЫ И ОБЛАЧНЫЕ ПРИЛОЖЕНИЯ (HTTPS) ────────────────${CLR_RESET}"
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Vaultwarden (Пароли):${CLR_RESET}         ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(первый вход: Создать аккаунт)${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Панель администратора:${CLR_RESET}        ${CLR_CYAN}https://${VAULT_DOMAIN}/admin${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Vaultwarden (Пароли):${CLR_RESET}         ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(первый вход: Создать аккаунт)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Панель администратора:${CLR_RESET}        ${CLR_CYAN}https://${VAULT_DOMAIN}/admin${CLR_RESET}"
     fi
     if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Gitea (Git-платформа):${CLR_RESET}        ${CLR_CYAN}https://${GITEA_DOMAIN}${CLR_RESET} ${CLR_MUTED}(SSH порт: 2222)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Gitea (Git-платформа):${CLR_RESET}        ${CLR_CYAN}https://${GITEA_DOMAIN}${CLR_RESET} ${CLR_MUTED}(SSH порт: 2222)${CLR_RESET}"
     fi
     if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET}     ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8080)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET}     ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8080)${CLR_RESET}"
     fi
     if [[ "${ENABLE_METUBE}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• MeTube (Медиа-загрузчик):${CLR_RESET}     ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8081)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• MeTube (Медиа-загрузчик):${CLR_RESET}     ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8081)${CLR_RESET}"
     fi
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ЕДИНЫЕ УЧЕТНЫЕ ДАННЫЕ ────────────────────────────────────────────────────┐${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Имя администратора:${CLR_RESET}           ${CLR_GREEN}${ADMIN_USER}${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Единый мастер-пароль:${CLR_RESET}         ${CLR_GREEN}${MASTER_PASS}${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ЕДИНЫЕ УЧЕТНЫЕ ДАННЫЕ ────────────────────────────────────${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Имя администратора:${CLR_RESET}           ${CLR_GREEN}${ADMIN_USER}${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Единый мастер-пароль:${CLR_RESET}         ${CLR_GREEN}${MASTER_PASS}${CLR_RESET}"
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Токен Vaultwarden /admin:${CLR_RESET}     ${CLR_YELLOW}${VAULT_ADMIN_TOKEN}${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Токен Vaultwarden /admin:${CLR_RESET}     ${CLR_YELLOW}${VAULT_ADMIN_TOKEN}${CLR_RESET}"
     fi
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
     if [ "$SSL_MODE" = "1" ]; then
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ДОВЕРИЕ СЕРТИФИКАТАМ (ROOT CA CERTIFICATE) ──────────────────────────────┐${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сертификат CA на сервере:${CLR_RESET}     ${CLR_YELLOW}${SAVE_DIR}/certificates/caddy-root.crt${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сетевой путь (SMB):${CLR_RESET}           ${CLR_YELLOW}\\\\${LOCAL_IP}\\${SHARE_NAME}\\certificates\\caddy-root.crt${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_MUTED}(Установите в 'Доверенные корневые центры' на ПК/смартфоне для зелёного замка)${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ДОВЕРИЕ СЕРТИФИКАТАМ (ROOT CA CERTIFICATE) ───────────────${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Сертификат CA на сервере:${CLR_RESET}     ${CLR_YELLOW}${SAVE_DIR}/certificates/caddy-root.crt${CLR_RESET}"
+        printf "  ${CLR_WHITE}• Сетевой путь (SMB):${CLR_RESET}           ${CLR_YELLOW}\\\\\\\\%s\\\\\\\\%s\\\\\\\\certificates\\\\\\\\caddy-root.crt${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
+        echo -e "  ${CLR_MUTED}(Установите в 'Доверенные корневые центры' на ПК/смартфоне для зелёного замка)${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
         echo ""
     fi
 
     if [[ "${ENABLE_SAMBA}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ СЕТЕВОЕ ХРАНИЛИЩЕ SAMBA (WINDOWS / MAC / LINUX) ──────────────────────────┐${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Сетевой адрес шары:${CLR_RESET}           ${CLR_GREEN}\\\\${LOCAL_IP}\\${SHARE_NAME}${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Логин / Пароль:${CLR_RESET}               ${ADMIN_USER} / ${SAMBA_PASS}"
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── СЕТЕВОЕ ХРАНИЛИЩЕ SAMBA (WINDOWS / MAC / LINUX) ───────────${CLR_RESET}"
+        printf "  ${CLR_WHITE}• Сетевой адрес шары:${CLR_RESET}           ${CLR_GREEN}\\\\\\\\%s\\\\\\\\%s${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
+        echo -e "  ${CLR_WHITE}• Логин / Пароль:${CLR_RESET}               ${ADMIN_USER} / ${SAMBA_PASS}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
         echo ""
     fi
 
     if [ "$STORAGE_MODE" != "1" ]; then
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ ДИСКОВОЕ ХРАНИЛИЩЕ И РАЗДЕЛЫ ─────────────────────────────────────────────┐${CLR_RESET}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Точка монтирования:${CLR_RESET}           ${MOUNT_ROOT}"
-        echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Каталог данных:${CLR_RESET}               ${SAVE_DIR}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ДИСКОВОЕ ХРАНИЛИЩЕ И РАЗДЕЛЫ ─────────────────────────────${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Точка монтирования:${CLR_RESET}           ${MOUNT_ROOT}"
+        echo -e "  ${CLR_WHITE}• Каталог данных:${CLR_RESET}               ${SAVE_DIR}"
         if [ "$STORAGE_MODE" = "4" ] || [ "$STORAGE_MODE" = "5" ]; then
-            echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Ручная разблокировка LUKS:${CLR_RESET}    sudo homelab-unlock"
+            echo -e "  ${CLR_WHITE}• Ручная разблокировка LUKS:${CLR_RESET}    sudo homelab-unlock"
         fi
-        echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+        echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
         echo ""
     fi
 
-    echo -e "  ${CLR_GREEN}${CLR_BOLD}┌─ НАСТРОЙКА ДОМАШНЕГО РОУТЕРА (1 ДЕЙСТВИЕ ДЛЯ ВСЕХ УСТРОЙСТВ) ──────────────┐${CLR_RESET}"
-    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}В параметрах DHCP вашего роутера укажите:${CLR_RESET}"
-    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}• Первичный DNS-сервер:${CLR_RESET}         ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}${CLR_BOLD}╭── НАСТРОЙКА ДОМАШНЕГО РОУТЕРА (1 ДЕЙСТВИЕ ДЛЯ ВСЕХ УСТРОЙСТВ) ──────────┐${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}В параметрах DHCP вашего роутера укажите:${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Первичный DNS-сервер:${CLR_RESET}         ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_WHITE}• Основной шлюз (Gateway):${CLR_RESET}      ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Основной шлюз (Gateway):${CLR_RESET}      ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
     fi
-    echo -e "  ${CLR_GREEN}│${CLR_RESET}"
-    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_MUTED}После этого все смартфоны, ПК и Smart TV в сети сразу получат фильтрацию${CLR_RESET}"
-    echo -e "  ${CLR_GREEN}│${CLR_RESET}  ${CLR_MUTED}рекламы, доступ к локальным *.lan доменам и интеллектуальную маршрутизацию!${CLR_RESET}"
-    echo -e "  ${CLR_GREEN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -e "  ${CLR_MUTED}После этого все смартфоны, ПК и Smart TV в сети сразу получат фильтрацию${CLR_RESET}"
+    echo -e "  ${CLR_MUTED}рекламы, доступ к локальным *.lan доменам и интеллектуальную маршрутизацию!${CLR_RESET}"
+    echo -e "  ${CLR_GREEN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}┌─ БЫСТРЫЕ КОМАНДЫ УПРАВЛЕНИЯ ───────────────────────────────────────────────┐${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Статус контейнеров:${CLR_RESET}           ${CLR_CYAN}dc ps${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Просмотр логов в реалтайме:${CLR_RESET}   ${CLR_CYAN}dc logs -f [сервис]${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Перезапуск всего комплекса:${CLR_RESET}   ${CLR_CYAN}sudo systemctl restart homelab.service${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}│${CLR_RESET}  ${CLR_WHITE}• Отчет диагностики:${CLR_RESET}            ${CLR_CYAN}cat /opt/homelab/diagnostic_report.log${CLR_RESET}"
-    echo -e "  ${CLR_CYAN}${CLR_BOLD}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── БЫСТРЫЕ КОМАНДЫ УПРАВЛЕНИЯ ───────────────────────────────${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Статус контейнеров:${CLR_RESET}           ${CLR_CYAN}dc ps${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Просмотр логов в реалтайме:${CLR_RESET}   ${CLR_CYAN}dc logs -f [сервис]${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Перезапуск всего комплекса:${CLR_RESET}   ${CLR_CYAN}sudo systemctl restart homelab.service${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Отчет диагностики:${CLR_RESET}            ${CLR_CYAN}cat /opt/homelab/diagnostic_report.log${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 }
 
