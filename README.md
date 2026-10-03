@@ -17,7 +17,7 @@
 Выполните команду в терминале вашего сервера (требуются права root/sudo). Команда автоматически определит наличие `curl` или `wget`:
 
 ```bash
-(command -v curl >/dev/null 2>&1 && curl -fsSL "[https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)" -o install.sh || wget -qO install.sh "[https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh](https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh)") && chmod +x install.sh && sudo ./install.sh
+(command -v curl >/dev/null 2>&1 && curl -fsSL "https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh" -o install.sh || wget -qO install.sh "https://raw.githubusercontent.com/unknownpeace/arch-homelab-gateway/refs/heads/main/install.sh") && chmod +x install.sh && sudo ./install.sh
 ```
 
 ### Раздельные команды (если хотите скачать вручную)
