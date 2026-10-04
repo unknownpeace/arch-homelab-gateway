@@ -430,34 +430,179 @@ detect_network() {
 # =============================================================================
 # 3. ВЫБОР ДИСКОВ И ХРАНИЛИЩА
 # =============================================================================
+release_device() {
+    local dev="$1"
+    [ -z "$dev" ] && return 0
+    local real_dev
+    real_dev=$(readlink -f "$dev" 2>/dev/null || echo "$dev")
+
+    log_info "Освобождение накопителя ${dev} от блокировок ядра и файловых систем..."
+
+    # 1. Завершение процессов и отмонтирование каталога хранилища
+    if mountpoint -q "${MOUNT_ROOT}"; then
+        fuser -km "${MOUNT_ROOT}" 2>/dev/null || true
+        umount -R "${MOUNT_ROOT}" 2>/dev/null || umount -l "${MOUNT_ROOT}" 2>/dev/null || true
+    fi
+
+    # 2. Отмонтирование любых несистемных точек монтирования устройства
+    while read -r mnt; do
+        if [ -n "$mnt" ] && [ "$mnt" != "/" ] && [[ ! "$mnt" =~ ^/(boot|efi|usr|var|home) ]]; then
+            fuser -km "$mnt" 2>/dev/null || true
+            umount -R "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true
+        fi
+    done < <(lsblk -rno MOUNTPOINTS,MOUNTPOINT "${real_dev}" 2>/dev/null | tr ' ' '
+' | grep -v '^$' || true)
+
+    # 3. Закрытие всех связанных LUKS / dm мапперов (включая старые сессии)
+    while read -r crypt_holder; do
+        if [ -n "$crypt_holder" ]; then
+            cryptsetup close "$crypt_holder" 2>/dev/null || dmsetup remove -f "$crypt_holder" 2>/dev/null || true
+        fi
+    done < <(lsblk -lno NAME,TYPE "${real_dev}" 2>/dev/null | awk '$2=="crypt" {print $1}')
+    cryptsetup close "${LUKS_MAP_NAME}" 2>/dev/null || dmsetup remove -f "${LUKS_MAP_NAME}" 2>/dev/null || true
+
+    # 4. Отключение swap, сброс кэшей буферов и ожидание udev
+    swapoff "${real_dev}"* 2>/dev/null || true
+    blockdev --flushbufs "${real_dev}" 2>/dev/null || true
+    udevadm settle 2>/dev/null || sleep 1
+
+    # 5. Очистка старых файловых сигнатур с защитой от Device or resource busy
+    log_info "Очистка сигнатур разметки (wipefs)..."
+    if ! wipefs -af "${real_dev}" 2>/dev/null; then
+        # Резервный сброс первых и последних секторов (MBR/GPT/LUKS заголовки)
+        dd if=/dev/zero of="${real_dev}" bs=1M count=16 oflag=direct status=none 2>/dev/null ||         dd if=/dev/zero of="${real_dev}" bs=1M count=16 status=none 2>/dev/null || true
+        blockdev --rereadpt "${real_dev}" 2>/dev/null || true
+        udevadm settle 2>/dev/null || sleep 1
+        wipefs -af "${real_dev}" 2>/dev/null || true
+    fi
+}
+
+assert_safe_device() {
+    local target_dev="$1"
+    local real_target
+    real_target=$(readlink -f "${target_dev}" 2>/dev/null || echo "${target_dev}")
+    local target_name
+    target_name=$(basename "${real_target}")
+    local target_disk
+    target_disk=$(lsblk -lno PKNAME "${real_target}" 2>/dev/null | head -n1 || true)
+    [ -z "${target_disk}" ] && target_disk=$(echo "${target_name}" | sed -E 's/p?[0-9]+$//')
+    [ -z "${target_disk}" ] && target_disk="${target_name}"
+
+    # 1. Поиск диска с корневой файловой системой (/)
+    local root_src
+    root_src=$(findmnt -n -o SOURCE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2 {print $1}')
+    root_src="${root_src%%\[*}"
+    local root_disk
+    root_disk=$(lsblk -lno PKNAME "${root_src}" 2>/dev/null | head -n1 || true)
+    [ -z "${root_disk}" ] && root_disk=$(basename "${root_src}" | sed -E 's/p?[0-9]+$//')
+
+    if [ -n "${root_disk}" ] && [ "${target_disk}" = "${root_disk}" ]; then
+        echo ""
+        log_err "КРИТИЧЕСКАЯ БЛОКИРОВКА БЕЗОПАСНОСТИ!"
+        log_err "Устройство ${target_dev} является системным накопителем (/dev/${root_disk}) текущей ОС!"
+        log_err "Форматирование системного диска категорически запрещено."
+        echo -e "      ${CLR_YELLOW}Для хранения на системном диске выберите режим [1] (Системный диск).${CLR_RESET}"
+        exit 1
+    fi
+
+    # 2. Защита критических системных разделов ОС (/boot, /efi, /usr, /var, /home)
+    local sys_mounts
+    sys_mounts=$(lsblk -lno MOUNTPOINT "${real_target}" 2>/dev/null | grep -E '^/(boot|efi|usr|var|home)($|/)' || true)
+    if [ -n "${sys_mounts}" ]; then
+        echo ""
+        log_err "КРИТИЧЕСКАЯ БЛОКИРОВКА БЕЗОПАСНОСТИ!"
+        log_err "Накопитель ${target_dev} содержит системные разделы ОС:"
+        echo -e "      ${CLR_YELLOW}${sys_mounts}${CLR_RESET}"
+        log_err "Форматирование диска с системными компонентами запрещено."
+        exit 1
+    fi
+
+    # 3. Если накопитель был ранее смонтирован как хранилище (/mnt/homelab_storage или в /mnt/ /media/) —
+    # освобождаем его перед форматированием
+    local cur_mounts
+    cur_mounts=$(lsblk -lno MOUNTPOINT "${real_target}" 2>/dev/null | grep -E '^/(mnt|media)' || true)
+    if [ -n "${cur_mounts}" ]; then
+        log_info "Освобождение диска: отмонтирование разделов хранилища..."
+        while read -r mnt_pt; do
+            [ -n "$mnt_pt" ] && (umount -R "$mnt_pt" 2>/dev/null || umount -l "$mnt_pt" 2>/dev/null || true)
+        done <<< "${cur_mounts}"
+        cryptsetup close "${LUKS_MAP_NAME}" 2>/dev/null || true
+    fi
+}
+
 select_disk_device() {
     log_info "Сканирование доступных физических накопителей..."
-    local EXCLUDE_PATTERNS
-    EXCLUDE_PATTERNS=$(lsblk -dno NAME,MOUNTPOINTS,TYPE 2>/dev/null | awk '
-        $3 ~ /(loop|zram)/ {print $1; next}
-        $2 ~ /^\/($|boot|efi|home|var|usr)/ {print $1; next}
-    ' | tr '\n' '|' | sed 's/|$//')
 
-    mapfile -t AVAIL_DEVS < <(lsblk -dpbno NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | awk -v excl="${EXCLUDE_PATTERNS}" '
-        $2 > 0 && $3 != "rom" && $3 != "loop" && $4 != "swap" {
-            dev = $1
-            sub(".*/", "", dev)
-            if (excl != "" && dev ~ "^(" excl ")") next
-            if ($5 == "") print $1
-        }')
+    # 1. Определение диска корневой системы (/)
+    local ROOT_SRC
+    ROOT_SRC=$(findmnt -n -o SOURCE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2 {print $1}')
+    ROOT_SRC="${ROOT_SRC%%\[*}"
+    local ROOT_DISK
+    ROOT_DISK=$(lsblk -lno PKNAME "${ROOT_SRC}" 2>/dev/null | head -n1 || true)
+    [ -z "${ROOT_DISK}" ] && ROOT_DISK=$(basename "${ROOT_SRC}" | sed -E 's/p?[0-9]+$//')
+
+    # 2. Определение дисков с системными разделами (/boot, /efi, /usr, /var, swap)
+    local SYSTEM_DISKS=()
+    [ -n "${ROOT_DISK}" ] && SYSTEM_DISKS+=("${ROOT_DISK}")
+
+    for smpt in /boot /boot/efi /efi /usr /var; do
+        if [ -d "$smpt" ]; then
+            local s_src
+            s_src=$(findmnt -n -o SOURCE "$smpt" 2>/dev/null || true)
+            s_src="${s_src%%\[*}"
+            if [ -n "$s_src" ]; then
+                local s_disk
+                s_disk=$(lsblk -lno PKNAME "$s_src" 2>/dev/null | head -n1 || true)
+                [ -z "$s_disk" ] && s_disk=$(basename "$s_src" | sed -E 's/p?[0-9]+$//')
+                [ -n "$s_disk" ] && SYSTEM_DISKS+=("${s_disk}")
+            fi
+        fi
+    done
+
+    while read -r sw_dev rest; do
+        [ -z "$sw_dev" ] || [ "$sw_dev" = "Filename" ] && continue
+        local sw_disk
+        sw_disk=$(lsblk -lno PKNAME "$sw_dev" 2>/dev/null | head -n1 || true)
+        [ -z "$sw_disk" ] && sw_disk=$(basename "$sw_dev" | sed -E 's/p?[0-9]+$//')
+        [ -n "$sw_disk" ] && SYSTEM_DISKS+=("${sw_disk}")
+    done < /proc/swaps 2>/dev/null || true
+
+    # 3. Фильтрация и выбор физических дисков
+    AVAIL_DEVS=()
+    while read -r d_name d_size d_type; do
+        [ "$d_type" != "disk" ] && continue
+        [ -z "$d_name" ] && continue
+        [[ "$d_name" =~ ^(loop|zram|ram) ]] && continue
+
+        # Проверка: системный ли это диск
+        local is_system=0
+        for sys_d in "${SYSTEM_DISKS[@]}"; do
+            if [ "$d_name" = "$sys_d" ]; then
+                is_system=1
+                break
+            fi
+        done
+        [ "$is_system" -eq 1 ] && continue
+
+        AVAIL_DEVS+=("/dev/${d_name}")
+    done < <(lsblk -lno NAME,SIZE,TYPE 2>/dev/null || true)
 
     if [ ${#AVAIL_DEVS[@]} -eq 0 ]; then
-        log_err "Свободные накопители не найдены!"
+        echo ""
+        log_err "Свободные внешние/дополнительные накопители не найдены!"
+        echo -e "      ${CLR_WHITE}Системный диск /dev/${ROOT_DISK:-sda} исключен из списка.${CLR_RESET}"
+        echo -e "      ${CLR_YELLOW}Подключите внешний/дополнительный диск или выберите режим [1] (Хранилище на системном диске).${CLR_RESET}"
         exit 1
     fi
 
     echo ""
-    echo -e "  ${CLR_CYAN}Доступные накопители:${CLR_RESET}"
+    echo -e "  ${CLR_CYAN}Доступные дополнительные/внешние накопители (системный диск /dev/${ROOT_DISK:-sda} исключен):${CLR_RESET}"
     for i in "${!AVAIL_DEVS[@]}"; do
         local DEV_NAME="${AVAIL_DEVS[$i]}"
         local DEV_INFO
-        DEV_INFO=$(lsblk -dno SIZE,MODEL,FSTYPE "${DEV_NAME}" 2>/dev/null | xargs)
-        printf "    ${CLR_WHITE}%d)${CLR_RESET} %-20s ${CLR_YELLOW}[%s]${CLR_RESET}\n" "$((i+1))" "${DEV_NAME}" "${DEV_INFO:-Без метки}"
+        DEV_INFO=$(lsblk -dno SIZE,MODEL,TRAN "${DEV_NAME}" 2>/dev/null | xargs)
+        printf "    ${CLR_WHITE}%d)${CLR_RESET} %-20s ${CLR_YELLOW}[%s]${CLR_RESET}
+" "$((i+1))" "${DEV_NAME}" "${DEV_INFO:-Без метки}"
     done
     echo ""
 
@@ -467,6 +612,7 @@ select_disk_device() {
     done
 
     CHOSEN_DEV="${AVAIL_DEVS[$((DEV_IDX-1))]}"
+    assert_safe_device "${CHOSEN_DEV}"
     log_ok "Выбрано целевое устройство: ${CHOSEN_DEV}"
 }
 
@@ -656,8 +802,8 @@ prompt_configuration() {
                 exit 1
             fi
 
-            umount "${CHOSEN_DEV}" 2>/dev/null || true
-            wipefs -a "${CHOSEN_DEV}"
+            assert_safe_device "${CHOSEN_DEV}"
+            release_device "${CHOSEN_DEV}"
             mkfs.btrfs -f -L "HOMELAB" "${CHOSEN_DEV}"
             DEV_UUID=$(blkid -s UUID -o value "${CHOSEN_DEV}")
 
@@ -689,9 +835,8 @@ prompt_configuration() {
                     exit 1
                 fi
 
-                umount "${CHOSEN_DEV}" 2>/dev/null || true
-                cryptsetup close "${LUKS_MAP_NAME}" 2>/dev/null || true
-                wipefs -a "${CHOSEN_DEV}"
+                assert_safe_device "${CHOSEN_DEV}"
+                release_device "${CHOSEN_DEV}"
 
                 log_info "Создание крипто-тома LUKS2 (задайте пароль диска):"
                 cryptsetup luksFormat --type luks2 --pbkdf argon2id "${CHOSEN_DEV}"
@@ -726,39 +871,34 @@ prompt_configuration() {
             SAVE_DIR="${MOUNT_ROOT}/${SUBDIR_NAME}"
             mkdir -p "${SAVE_DIR}"
 
-            echo ""
-            read -rp "  [?] Настроить авторазблокировку при старте через ключ-файл? [Y/n] [Y]: " AUTO_UNLOCK
-            AUTO_UNLOCK=${AUTO_UNLOCK:-Y}
-
+            log_info "Автоматическая настройка авторазблокировки при старте через ключ-файл..."
             DEV_UUID=$(blkid -s UUID -o value "${CHOSEN_DEV}")
 
-            if [[ "${AUTO_UNLOCK}" =~ ^[Yy]$ ]]; then
-                KEY_DIR="/etc/cryptsetup-keys.d"
-                KEY_FILE="${KEY_DIR}/storage_${LUKS_MAP_NAME}.key"
+            KEY_DIR="/etc/cryptsetup-keys.d"
+            KEY_FILE="${KEY_DIR}/storage_${LUKS_MAP_NAME}.key"
 
-                mkdir -p "${KEY_DIR}"
-                chmod 700 "${KEY_DIR}"
+            mkdir -p "${KEY_DIR}"
+            chmod 700 "${KEY_DIR}"
 
-                if [ ! -f "${KEY_FILE}" ]; then
-                    log_info "Генерация случайного крипто-ключа авторазблокировки..."
-                    dd if=/dev/urandom of="${KEY_FILE}" bs=512 count=1 status=none
-                    chmod 400 "${KEY_FILE}"
+            if [ ! -f "${KEY_FILE}" ]; then
+                log_info "Генерация случайного крипто-ключа авторазблокировки..."
+                dd if=/dev/urandom of="${KEY_FILE}" bs=512 count=1 status=none
+                chmod 400 "${KEY_FILE}"
 
-                    log_info "Добавление ключа в слот LUKS2 (введите пароль диска):"
-                    cryptsetup luksAddKey "${CHOSEN_DEV}" "${KEY_FILE}"
-                fi
-
-                if ! grep -q "${LUKS_MAP_NAME}" /etc/crypttab 2>/dev/null; then
-                    echo "${LUKS_MAP_NAME} UUID=${DEV_UUID} ${KEY_FILE} luks,nofail,timeout=15" >> /etc/crypttab
-                fi
-
-                if ! grep -q "${MOUNT_ROOT}" /etc/fstab 2>/dev/null; then
-                    echo "${MAPPER_DEV} ${MOUNT_ROOT} ${DEV_FSTYPE} ${MOUNT_OPTS} 0 0" >> /etc/fstab
-                fi
-
-                STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
-                log_ok "Авторазблокировка успешно настроена в crypttab и fstab!"
+                log_info "Добавление ключа в слот LUKS2 (введите пароль диска):"
+                cryptsetup luksAddKey "${CHOSEN_DEV}" "${KEY_FILE}"
             fi
+
+            if ! grep -q "${LUKS_MAP_NAME}" /etc/crypttab 2>/dev/null; then
+                echo "${LUKS_MAP_NAME} UUID=${DEV_UUID} ${KEY_FILE} luks,nofail,timeout=15" >> /etc/crypttab
+            fi
+
+            if ! grep -q "${MOUNT_ROOT}" /etc/fstab 2>/dev/null; then
+                echo "${MAPPER_DEV} ${MOUNT_ROOT} ${DEV_FSTYPE} ${MOUNT_OPTS} 0 0" >> /etc/fstab
+            fi
+
+            STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
+            log_ok "Авторазблокировка успешно настроена в crypttab и fstab (автоматический режим)!"
 
             cat << EOF_UNLOCK > /usr/local/bin/homelab-unlock
 #!/usr/bin/env bash
