@@ -4,7 +4,7 @@ set -euo pipefail
 # =============================================================================
 # Project: Homelab Appliance & Transparent Gateway (Enterprise Edition 2026)
 # Homelab Appliance & Gateway | Optimized for 2026 Linux Ecosystem & Docker 27+
-# Supported OS: Debian 12/13 (Trixie), Ubuntu 22.04/24.04/24.10, Arch Linux
+# Supported OS: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux
 # Components: AdGuard Home, Mihomo TUN (Mixed), Vaultwarden (Alpine),
 #             Gitea (Git-сервер), Vaultwarden, Samba (WSDD2), qBittorrent, MeTube, Caddy, Watchtower
 # =============================================================================
@@ -144,7 +144,7 @@ show_banner() {
     echo -e "${CLR_CYAN}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
     echo ""
     echo -e "  ${CLR_CYAN}Автоматизированный комплекс сервисов, прозрачного шлюза и шифрования${CLR_RESET}"
-    echo -e "  ${CLR_DIM}Поддержка: Debian 12/13, Ubuntu 22.04/24.04/24.10, Arch Linux | 2026${CLR_RESET}"
+    echo -e "  ${CLR_DIM}Поддержка: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux | 2026${CLR_RESET}"
     echo ""
 }
 
@@ -165,6 +165,8 @@ detect_os() {
         . /etc/os-release
         OS_ID="${ID:-}"
         OS_ID_LIKE="${ID_LIKE:-}"
+        OS_VER_ID="${VERSION_ID:-}"
+        OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
     else
         log_err "Не удалось определить дистрибутив Linux (/etc/os-release отсутствует)!"
         exit 1
@@ -174,11 +176,33 @@ detect_os() {
     if [[ "${OS_ID}" =~ ^(arch|artix|endeavouros|manjaro)$ ]] || [[ "${OS_ID_LIKE}" =~ arch ]]; then
         DISTRO_FAMILY="arch"
         log_ok "Обнаружена ОС семейства Arch Linux: ${CLR_WHITE}${PRETTY_NAME:-Arch Linux}${CLR_RESET}"
-    elif [[ "${OS_ID}" =~ ^(ubuntu|debian)$ ]] || [[ "${OS_ID_LIKE}" =~ (ubuntu|debian) ]]; then
+    elif [[ "${OS_ID}" =~ ^debian$ ]] || [[ "${OS_ID_LIKE}" =~ debian && ! "${OS_ID}" =~ ubuntu ]]; then
+        local DEB_VER="${OS_VER_ID%%.*}"
+        if [ -n "${DEB_VER}" ] && [ "${DEB_VER}" -lt 13 ] && [ "${OS_CODENAME}" != "trixie" ] && [ "${OS_CODENAME}" != "sid" ]; then
+            log_err "Обнаружена неподдерживаемая версия Debian ${OS_VER_ID} (${OS_CODENAME})!"
+            log_err "Скрипт оптимизирован строго для Debian 13 (Trixie) и новее (2026). Debian 12 и старше исключены."
+            exit 1
+        fi
         DISTRO_FAMILY="debian"
-        log_ok "Обнаружена ОС семейства Debian/Ubuntu: ${CLR_WHITE}${PRETTY_NAME:-Linux}${CLR_RESET}"
+        log_ok "Обнаружена ОС семейства Debian: ${CLR_WHITE}${PRETTY_NAME:-Debian 13 (Trixie)}${CLR_RESET}"
+    elif [[ "${OS_ID}" =~ ^ubuntu$ ]] || [[ "${OS_ID_LIKE}" =~ ubuntu ]]; then
+        local UBU_VER="${OS_VER_ID}"
+        local IS_VALID_UBU=0
+        if [ -n "${UBU_VER}" ]; then
+            python3 -c "import sys; sys.exit(0 if float('${UBU_VER}') >= 26.04 else 1)" 2>/dev/null && IS_VALID_UBU=1 || IS_VALID_UBU=0
+        elif [ "${OS_CODENAME}" = "resolute" ]; then
+            IS_VALID_UBU=1
+        fi
+        if [ "${IS_VALID_UBU}" -ne 1 ]; then
+            log_err "Обнаружена неподдерживаемая версия Ubuntu ${OS_VER_ID:-} (${OS_CODENAME:-})!"
+            log_err "Скрипт оптимизирован строго для Ubuntu 26.04 LTS (Resolute) и новее (2026). Устаревшие версии исключены."
+            exit 1
+        fi
+        DISTRO_FAMILY="debian"
+        log_ok "Обнаружена ОС семейства Ubuntu: ${CLR_WHITE}${PRETTY_NAME:-Ubuntu 26.04 LTS}${CLR_RESET}"
     else
         log_err "Неподдерживаемый дистрибутив: ${OS_ID}."
+        log_err "Поддерживаются: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux."
         exit 1
     fi
 }
@@ -249,7 +273,7 @@ install_pkgs() {
 
         run_spin "Установка системных пакетов и утилит" \
             apt-get install -y --no-install-recommends \
-                systemd-timesyncd python3 iproute2 cryptsetup btrfs-progs ntfs-3g \
+                systemd-timesyncd python3 python3-bcrypt iproute2 cryptsetup btrfs-progs ntfs-3g \
                 util-linux curl openssl ca-certificates jq iptables apache2-utils \
                 unzip tar sqlite3 argon2 iputils-ping
 
@@ -259,7 +283,10 @@ install_pkgs() {
 
             local REPO_OS="debian"
             [[ "${OS_ID}" =~ ubuntu ]] || [[ "${OS_ID_LIKE}" =~ ubuntu ]] && REPO_OS="ubuntu"
-            local CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-bookworm}}"
+            local CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+            if [ -z "${CODENAME}" ]; then
+                [ "${REPO_OS}" = "ubuntu" ] && CODENAME="resolute" || CODENAME="trixie"
+            fi
 
             install -m 0755 -d /etc/apt/keyrings
             curl -fsSL "https://download.docker.com/linux/${REPO_OS}/gpg" -o /etc/apt/keyrings/docker.asc
@@ -327,6 +354,21 @@ sys.exit(0)
         ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
     fi
 
+    # Установка универсального системного враппера dc в /usr/local/bin/dc
+    cat << 'EOF_DC_BIN' > /usr/local/bin/dc
+#!/usr/bin/env bash
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    exec docker compose "$@"
+elif command -v docker-compose >/dev/null 2>&1; then
+    exec docker-compose "$@"
+elif [ -x /usr/lib/docker/cli-plugins/docker-compose ]; then
+    exec docker compose "$@"
+else
+    exec docker compose "$@"
+fi
+EOF_DC_BIN
+    chmod 755 /usr/local/bin/dc 2>/dev/null || true
+
     # Настройка прав на сокет Docker для работы без sudo
     if [ -S /var/run/docker.sock ]; then
         chmod 666 /var/run/docker.sock 2>/dev/null || true
@@ -354,14 +396,13 @@ detect_network() {
         LOCAL_IP=${LOCAL_IP:-192.168.1.100}
     fi
 
-    ROUTER_GATEWAY=$(ip route show default dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $3}' | head -n1 || true)
-    if [ -z "${ROUTER_GATEWAY}" ] || [ "${ROUTER_GATEWAY}" = "${LOCAL_IP}" ]; then
-        ROUTER_GATEWAY=$(ip neigh show dev "${DEFAULT_IFACE}" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "${LOCAL_IP}" | head -n1 || true)
+    ROUTER_GATEWAY=$(ip route show default dev "${DEFAULT_IFACE}" 2>/dev/null | awk '/via/ {for(j=1;j<=NF;j++) if($j=="via") {print $(j+1); exit}}' || true)
+    if [ -z "${ROUTER_GATEWAY}" ] || [ "${ROUTER_GATEWAY}" = "${LOCAL_IP}" ] || [[ ! "${ROUTER_GATEWAY}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ROUTER_GATEWAY=$(ip neigh show dev "${DEFAULT_IFACE}" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "${LOCAL_IP}" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
     fi
-    if [ -z "${ROUTER_GATEWAY}" ]; then
+    if [ -z "${ROUTER_GATEWAY}" ] || [[ ! "${ROUTER_GATEWAY}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         ROUTER_GATEWAY=$(echo "${LOCAL_IP}" | sed 's/\.[0-9]*$/.1/' || echo "192.168.1.1")
     fi
-
     RAW_SUBNET=$(ip -o -f inet addr show dev "${DEFAULT_IFACE}" 2>/dev/null | awk '{print $4}' | head -n1 || true)
     if [ -n "${RAW_SUBNET}" ]; then
         LAN_SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('${RAW_SUBNET}', strict=False))" 2>/dev/null || echo "${RAW_SUBNET}")
@@ -567,9 +608,6 @@ prompt_configuration() {
         TORRENT_DOMAIN="torrent.lan"
         METUBE_DOMAIN="metube.lan"
         PROXY_DOMAIN="proxy.lan"
-        GITEA_DOMAIN="git.lan"
-        ADGUARD_DOMAIN="adguard.lan"
-        PROXY_DOMAIN="proxy.lan"
     else
         echo -e "  ${CLR_CYAN}--- Настройка дискового хранилища ---${CLR_RESET}"
         echo "    1) Системный диск [Enter]"
@@ -736,7 +774,7 @@ fi
 mkdir -p "${MOUNT_ROOT}"
 mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
 echo "[*] Запуск сервисов Docker..."
-cd "${APP_DIR}" && docker compose up -d
+cd "${APP_DIR}" && (command -v dc >/dev/null 2>&1 && dc up -d || docker compose up -d)
 echo "[+] Диск смонтирован, сервисы готовы к работе!"
 EOF_UNLOCK
             chmod 750 /usr/local/bin/homelab-unlock
@@ -795,10 +833,6 @@ EOF_UNLOCK
             TORRENT_DOMAIN="torrent.${BASE_DOMAIN}"
             METUBE_DOMAIN="metube.${BASE_DOMAIN}"
             PROXY_DOMAIN="proxy.${BASE_DOMAIN}"
-            VAULT_DOMAIN="vault.${BASE_DOMAIN}"
-            GITEA_DOMAIN="git.${BASE_DOMAIN}"
-            ADGUARD_DOMAIN="adguard.${BASE_DOMAIN}"
-            PROXY_DOMAIN="proxy.${BASE_DOMAIN}"
         else
             SSL_MODE="1"
             DUCKDNS_NAME=""
@@ -809,9 +843,6 @@ EOF_UNLOCK
             ADGUARD_DOMAIN="adguard.lan"
             TORRENT_DOMAIN="torrent.lan"
             METUBE_DOMAIN="metube.lan"
-            PROXY_DOMAIN="proxy.lan"
-            GITEA_DOMAIN="git.lan"
-            ADGUARD_DOMAIN="adguard.lan"
             PROXY_DOMAIN="proxy.lan"
         fi
 
@@ -913,12 +944,6 @@ try:
 except Exception:
     pass
 try:
-    import crypt
-    salt = crypt.mksalt(crypt.METHOD_BLOWFISH) if hasattr(crypt, 'METHOD_BLOWFISH') else crypt.mksalt(crypt.METHOD_SHA512)
-    print(crypt.crypt(pw, salt))
-    sys.exit(0)
-except Exception:
-    pass
 " <<< "${AGH_PASS}" 2>/dev/null || true)
     fi
     if [ -z "${AGH_HASH}" ] && command -v docker >/dev/null 2>&1; then
@@ -1003,20 +1028,32 @@ IFACE="${PHYS_IFACE:-}"
 SERVER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
 ROUTER_IP="${SAVED_ROUTER_GATEWAY:-}"
 
-if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
-    ROUTER_IP=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "$SERVER_IP" | head -n1 || true)
+if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ] || [[ ! "$ROUTER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ROUTER_IP=$(ip route show default dev "$IFACE" 2>/dev/null | awk '/via/ {for(j=1;j<=NF;j++) if($j=="via") {print $(j+1); exit}}' || true)
 fi
 
-if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
+if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ] || [[ ! "$ROUTER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ROUTER_IP=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -E 'REACHABLE|DELAY|STALE' | awk '{print $1}' | grep -v "$SERVER_IP" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+fi
+
+if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ] || [[ ! "$ROUTER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     ROUTER_IP=$(echo "$SERVER_IP" | sed 's/\.[0-9]*$/.1/' || true)
 fi
 
-if [ -n "$ROUTER_IP" ] && [ "$ROUTER_IP" != "$SERVER_IP" ]; then
-    CURRENT_MAIN_GW=$(ip route show default dev "$IFACE" 2>/dev/null | awk '{print $3}' | head -n1 || true)
+if [ -n "$ROUTER_IP" ] && [ "$ROUTER_IP" != "$SERVER_IP" ] && [[ "$ROUTER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    CURRENT_MAIN_GW=$(ip route show default dev "$IFACE" 2>/dev/null | awk '/via/ {for(j=1;j<=NF;j++) if($j=="via") {print $(j+1); exit}}' || true)
     if [ "$CURRENT_MAIN_GW" = "$SERVER_IP" ] || [ -z "$CURRENT_MAIN_GW" ]; then
         echo "[Watchdog] Восстановление корректного маршрута default через ${ROUTER_IP} на ${IFACE}"
         ip route replace default via "$ROUTER_IP" dev "$IFACE" metric 100 2>/dev/null || true
     fi
+fi
+
+# Поддержание активного форвардинга и правил NAT после перезапуска Docker
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+iptables -P FORWARD ACCEPT 2>/dev/null || true
+if [ -n "$IFACE" ]; then
+    iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 fi
 EOF_WATCHDOG
         chmod 750 /usr/local/bin/gateway-watchdog.sh
@@ -1114,17 +1151,25 @@ for u in urls:
 
 if os.path.isfile(zip_p) and os.path.getsize(zip_p) > 50000:
     with zipfile.ZipFile(zip_p, 'r') as z:
-        for m in z.namelist():
-            if 'public/' in m and not m.endswith('/'):
-                rel = m.split('public/', 1)[1]
-                target = os.path.join(dest, rel)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with open(target, 'wb') as out_f:
-                    out_f.write(z.read(m))
-                pub_target = os.path.join(dest, 'public', rel)
-                os.makedirs(os.path.dirname(pub_target), exist_ok=True)
-                with open(pub_target, 'wb') as pub_f:
-                    pub_f.write(z.read(m))
+        names = [n for n in z.namelist() if not n.endswith('/')]
+        has_public = any('public/' in n for n in names)
+        for m in names:
+            if has_public:
+                if 'public/' in m:
+                    rel = m.split('public/', 1)[1]
+                else:
+                    continue
+            else:
+                parts = m.split('/', 1)
+                rel = parts[1] if len(parts) > 1 and parts[0].lower() in ('vuetorrent', 'vuetorrent-main') else m
+            target = os.path.join(dest, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, 'wb') as out_f:
+                out_f.write(z.read(m))
+            pub_target = os.path.join(dest, 'public', rel)
+            os.makedirs(os.path.dirname(pub_target), exist_ok=True)
+            with open(pub_target, 'wb') as pub_f:
+                pub_f.write(z.read(m))
     try:
         os.remove(zip_p)
     except Exception:
@@ -1191,10 +1236,21 @@ EOF_QBIT_CONF
             log_ok "Веб-интерфейс MetaCubeXD уже установлен (пропуск загрузки)"
         else
             fetch_metacubexd() {
-                curl -fsSL 'https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz' | \
-                tar -xz -C "${APP_DIR}/mihomo/ui" --strip-components=1 2>/dev/null || true
+                local urls=(
+                    'https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz'
+                    'https://mirror.ghproxy.com/https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz'
+                    'https://ghproxy.net/https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz'
+                )
+                local tar_tmp="/tmp/metacubexd.tar.gz"
+                for u in "${urls[@]}"; do
+                    if curl -fsSL --connect-timeout 8 -m 30 "$u" -o "$tar_tmp" 2>/dev/null && [ -s "$tar_tmp" ]; then
+                        tar -xzf "$tar_tmp" -C "${APP_DIR}/mihomo/ui" --strip-components=1 2>/dev/null && rm -f "$tar_tmp" && return 0
+                        rm -f "$tar_tmp"
+                    fi
+                done
+                return 1
             }
-            run_spin "Загрузка веб-интерфейса MetaCubeXD" fetch_metacubexd
+            run_spin "Загрузка веб-интерфейса MetaCubeXD (с зеркалами)" fetch_metacubexd || true
         fi
 
         # Предотвращение Mixed Content в UI
@@ -1476,7 +1532,8 @@ rules:
   - GEOIP,private,DIRECT,no-resolve
   - GEOIP,lan,DIRECT,no-resolve
   # Торрент-пиры и трекеры — напрямую на полной скорости провайдера
-  - DST-PORT,6888,DIRECT
+  - DST-PORT,6881,DIRECT
+  - SRC-PORT,6881,DIRECT
   # Российские зоны, ресурсы и гео-базы — 100% напрямую без прокси (Госуслуги, банки, маркетплейсы)
   - DOMAIN-SUFFIX,ru,DIRECT
   - DOMAIN-SUFFIX,su,DIRECT
@@ -1846,8 +1903,8 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${APP_DIR}
 ${WATCHDOG_EXEC_LINE}
-ExecStart=/bin/sh -c 'if docker compose version >/dev/null 2>&1; then docker compose up -d; else docker-compose up -d; fi'
-ExecStop=/bin/sh -c 'dc down'
+ExecStart=/usr/local/bin/dc up -d
+ExecStop=/usr/local/bin/dc down
 TimeoutStartSec=300
 
 [Install]
@@ -1930,6 +1987,7 @@ EOF_BKP_TMR
         ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
     fi
 
+
     run_spin "Загрузка Docker-образов стека" bash -c "dc pull -q 2>/dev/null || dc pull"
 
     run_spin "Запуск контейнеров стека (Docker Compose)" bash -c "dc up -d --quiet-pull 2>/dev/null || dc up -d"
@@ -1940,7 +1998,9 @@ EOF_BKP_TMR
         local GITEA_READY=0
         for i in {1..35}; do
             if docker inspect -f '{{.State.Status}}' gitea 2>/dev/null | grep -q "running"; then
-                if docker exec gitea curl -sf http://localhost:3000/api/v1/version >/dev/null 2>&1 || [ $i -ge 10 ]; then
+                if docker exec gitea wget -q -O - http://localhost:3000/api/v1/version >/dev/null 2>&1 || \
+                   docker exec gitea curl -sf http://localhost:3000/api/v1/version >/dev/null 2>&1 || \
+                   [ $i -ge 10 ]; then
                     if docker exec -u git gitea gitea admin user create --admin --username "${ADMIN_USER}" --password "${MASTER_PASS}" --email "${ADMIN_USER}@example.lan" >/dev/null 2>&1; then
                         log_ok "Администратор Gitea (${ADMIN_USER}) успешно создан с мастер-паролем"
                         GITEA_READY=1
@@ -2075,7 +2135,13 @@ EOF_DIAG
     fi
 
     # Проверка каталога хранилища
-    if [ -d "${SAVE_DIR}" ] && [ -w "${SAVE_DIR}" ]; then
+    local STORAGE_OK=0
+    if [ -d "${SAVE_DIR}" ]; then
+        if su -s /bin/sh "${TARGET_USER}" -c "test -w '${SAVE_DIR}'" 2>/dev/null || [ -w "${SAVE_DIR}" ]; then
+            STORAGE_OK=1
+        fi
+    fi
+    if [ "${STORAGE_OK}" -eq 1 ]; then
         echo -e "    ${TAG_OK} Каталог хранилища:        ${CLR_GREEN}[ДОСТУПЕН ДЛЯ ЗАПИСИ]${CLR_RESET}"
         echo "Storage directory ${SAVE_DIR}: OK" >> "${DIAG_LOG}"
     else
@@ -2133,7 +2199,7 @@ show_summary_dashboard() {
 
     echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── СЕТЕВОЙ ШЛЮЗ И МАРШРУТИЗАЦИЯ ────────────────────────────${CLR_RESET}"
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET} ${CLR_MUTED}(DNS порт 53)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Mihomo Smart Routing UI:${CLR_RESET}      ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Секрет панели управления:${CLR_RESET}     ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
     else
@@ -2144,17 +2210,17 @@ show_summary_dashboard() {
 
     echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ВЕБ-СЕРВИСЫ И ОБЛАЧНЫЕ ПРИЛОЖЕНИЯ (HTTPS) ────────────────${CLR_RESET}"
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_WHITE}• Vaultwarden (Пароли):${CLR_RESET}         ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(первый вход: Создать аккаунт)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• Vaultwarden (Пароли):${CLR_RESET}         ${CLR_CYAN}https://${VAULT_DOMAIN}${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Панель администратора:${CLR_RESET}        ${CLR_CYAN}https://${VAULT_DOMAIN}/admin${CLR_RESET}"
     fi
     if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
         echo -e "  ${CLR_WHITE}• Gitea (Git-платформа):${CLR_RESET}        ${CLR_CYAN}https://${GITEA_DOMAIN}${CLR_RESET} ${CLR_MUTED}(SSH порт: 2222)${CLR_RESET}"
     fi
     if [[ "${ENABLE_QBIT}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET}     ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8080)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• qBittorrent (VueTorrent):${CLR_RESET}     ${CLR_CYAN}https://${TORRENT_DOMAIN}${CLR_RESET}"
     fi
     if [[ "${ENABLE_METUBE}" =~ ^[Yy]$ ]]; then
-        echo -e "  ${CLR_WHITE}• MeTube (Медиа-загрузчик):${CLR_RESET}     ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET} ${CLR_MUTED}(LAN: http://${LOCAL_IP}:8081)${CLR_RESET}"
+        echo -e "  ${CLR_WHITE}• MeTube (Медиа-загрузчик):${CLR_RESET}     ${CLR_CYAN}https://${METUBE_DOMAIN}${CLR_RESET}"
     fi
     echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
@@ -2171,7 +2237,7 @@ show_summary_dashboard() {
     if [ "$SSL_MODE" = "1" ]; then
         echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── ДОВЕРИЕ СЕРТИФИКАТАМ (ROOT CA CERTIFICATE) ───────────────${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Сертификат CA на сервере:${CLR_RESET}     ${CLR_YELLOW}${SAVE_DIR}/certificates/caddy-root.crt${CLR_RESET}"
-        printf "  ${CLR_WHITE}• Сетевой путь (SMB):${CLR_RESET}           ${CLR_YELLOW}\\\\\\\\%s\\\\\\\\%s\\\\\\\\certificates\\\\\\\\caddy-root.crt${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
+        printf "  ${CLR_WHITE}• Сетевой путь (SMB):${CLR_RESET}           ${CLR_YELLOW}\\\\\\\\%s\\\\%s\\\\certificates\\\\caddy-root.crt${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
         echo -e "  ${CLR_MUTED}(Установите в 'Доверенные корневые центры' на ПК/смартфоне для зелёного замка)${CLR_RESET}"
         echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
         echo ""
@@ -2179,7 +2245,7 @@ show_summary_dashboard() {
 
     if [[ "${ENABLE_SAMBA}" =~ ^[Yy]$ ]]; then
         echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── СЕТЕВОЕ ХРАНИЛИЩЕ SAMBA (WINDOWS / MAC / LINUX) ───────────${CLR_RESET}"
-        printf "  ${CLR_WHITE}• Сетевой адрес шары:${CLR_RESET}           ${CLR_GREEN}\\\\\\\\%s\\\\\\\\%s${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
+        printf "  ${CLR_WHITE}• Сетевой адрес шары:${CLR_RESET}           ${CLR_GREEN}\\\\\\\\%s\\\\%s${CLR_RESET}\n" "${LOCAL_IP}" "${SHARE_NAME}"
         echo -e "  ${CLR_WHITE}• Логин / Пароль:${CLR_RESET}               ${ADMIN_USER} / ${SAMBA_PASS}"
         echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
         echo ""
@@ -2238,4 +2304,3 @@ main() {
 }
 
 main "$@"
-
