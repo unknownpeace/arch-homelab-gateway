@@ -1,11 +1,37 @@
 #!/usr/bin/env bash
+# Self-bootstrap into bash if started under /bin/sh (common on Alpine Linux)
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    else
+        echo "[!] Bash is required for this installer." >&2
+        if command -v apk >/dev/null 2>&1; then
+            echo "[*] Installing bash via apk..." >&2
+            apk add --no-cache bash
+            exec bash "$0" "$@"
+        elif command -v apt-get >/dev/null 2>&1; then
+            echo "[*] Installing bash via apt-get..." >&2
+            apt-get update && apt-get install -y bash
+            exec bash "$0" "$@"
+        elif command -v pacman >/dev/null 2>&1; then
+            echo "[*] Installing bash via pacman..." >&2
+            pacman -Sy --noconfirm bash
+            exec bash "$0" "$@"
+        else
+            echo "[-] Error: Bash is not installed. Please install bash and re-run." >&2
+            exit 1
+        fi
+    fi
+fi
+
 set -euo pipefail
 
 # =============================================================================
 # Project: Homelab Appliance & Transparent Gateway (Kaxa Enterprise Edition 2026)
 # Enterprise & Homelab Unified Gateway | Linux 2026 Ecosystem & Docker 28+ / 29+
-# Supported OS: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute Raccoon), Arch Linux
-#   (Compatibility Mode: Debian 12+, Ubuntu 24.04+)
+# Supported OS: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux,
+#               Alpine Linux v3.19+ (OpenRC)
+#   (Compatibility Mode: Debian 12+, Ubuntu 24.04+, Alpine Linux v3.18+)
 # Components: AdGuard Home (v0.107+ Schema 34), Mihomo TUN (Smart Routing & MRS Rulesets),
 #             Vaultwarden (Argon2id), Gitea (Git-Server), Samba (WSDD2),
 #             qBittorrent (VueTorrent WebUI), MeTube (yt-dlp), Caddy (Internal/DuckDNS SSL),
@@ -160,6 +186,8 @@ DETECTED_DOCKER_API=""
 VAULT_DATA_DIR=""
 GITEA_DATA_DIR=""
 ADGUARD_WORK_DIR=""
+DISTRO_FAMILY=""
+INIT_SYSTEM="systemd"
 
 show_banner() {
     clear 2>/dev/null || true
@@ -176,13 +204,13 @@ show_banner() {
     echo -e "${CLR_CYAN}└────────────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
     echo ""
     echo -e "  ${CLR_CYAN}Автоматизированный комплекс сервисов, прозрачного шлюза и шифрования${CLR_RESET}"
-    echo -e "  ${CLR_DIM}Поддержка: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux | 2026${CLR_RESET}"
+    echo -e "  ${CLR_DIM}Поддержка: Debian 13/12, Ubuntu 26.04/24.04 LTS, Arch Linux, Alpine Linux v3.19+ | 2026${CLR_RESET}"
     echo ""
 }
 
 check_privileges() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-        log_err "Скрипт должен быть запущен с правами root (sudo)!"
+        log_err "Скрипт должен быть запущен с правами root (sudo / doas)!"
         echo -e "      ${CLR_WHITE}Запуск: sudo $0${CLR_RESET}"
         exit 1
     fi
@@ -206,6 +234,9 @@ detect_os() {
     if [[ "${OS_ID}" =~ ^(arch|artix|endeavouros|manjaro)$ ]] || [[ "${OS_ID_LIKE}" =~ arch ]]; then
         DISTRO_FAMILY="arch"
         log_ok "Обнаружена ОС семейства Arch Linux: ${CLR_WHITE}${PRETTY_NAME:-Arch Linux}${CLR_RESET}"
+    elif [[ "${OS_ID}" =~ ^alpine$ ]] || [[ "${OS_ID_LIKE}" =~ alpine ]]; then
+        DISTRO_FAMILY="alpine"
+        log_ok "Обнаружена ОС семейства Alpine Linux: ${CLR_WHITE}${PRETTY_NAME:-Alpine Linux} (${OS_VER_ID:-})${CLR_RESET}"
     elif [[ "${OS_ID}" =~ ^debian$ ]] || [[ "${OS_ID_LIKE}" =~ debian && ! "${OS_ID}" =~ ubuntu ]]; then
         DISTRO_FAMILY="debian"
         local DEB_VER="${OS_VER_ID%%.*}"
@@ -239,9 +270,18 @@ detect_os() {
         log_ok "Обнаружена ОС семейства Ubuntu: ${CLR_WHITE}${PRETTY_NAME:-Ubuntu 26.04 LTS (Resolute)}${CLR_RESET}"
     else
         log_err "Неподдерживаемый дистрибутив: ${OS_ID}."
-        log_err "Поддерживаются: Debian 13/12, Ubuntu 26.04/24.04 LTS, Arch Linux."
+        log_err "Поддерживаются: Debian 13/12, Ubuntu 26.04/24.04 LTS, Arch Linux, Alpine Linux v3.19+."
         exit 1
     fi
+
+    # Определение подсистемы инициализации (systemd или OpenRC)
+    INIT_SYSTEM="systemd"
+    if [ "${DISTRO_FAMILY}" = "alpine" ] || [ -f /sbin/openrc-run ] || command -v rc-service >/dev/null 2>&1; then
+        if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+            INIT_SYSTEM="openrc"
+        fi
+    fi
+    log_info "Используется подсистема инициализации: ${INIT_SYSTEM}"
 }
 
 load_previous_config() {
@@ -269,18 +309,40 @@ sync_time() {
     fi
 
     if [ -n "${HTTP_DATE}" ]; then
-        if date -s "${HTTP_DATE}" >/dev/null 2>&1; then
-            log_ok "Системное время синхронизировано: $(date -R)"
+        local ISO_DATE
+        ISO_DATE=$(echo "${HTTP_DATE}" | tr -d ',' | awk '
+        BEGIN {
+            m["Jan"]="01"; m["Feb"]="02"; m["Mar"]="03"; m["Apr"]="04";
+            m["May"]="05"; m["Jun"]="06"; m["Jul"]="07"; m["Aug"]="08";
+            m["Sep"]="09"; m["Oct"]="10"; m["Nov"]="11"; m["Dec"]="12";
+        }
+        NF>=5 {
+            printf "%s-%s-%02d %s\n", $4, m[$3], $2, $5
+        }')
+        if [ -n "${ISO_DATE}" ] && date -u -s "${ISO_DATE}" >/dev/null 2>&1; then
+            log_ok "Системное время синхронизировано: $(date -R 2>/dev/null || date)"
+        elif date -s "${HTTP_DATE}" >/dev/null 2>&1; then
+            log_ok "Системное время синхронизировано: $(date -R 2>/dev/null || date)"
         fi
     fi
 
-    if command -v timedatectl >/dev/null 2>&1; then
-        timedatectl set-ntp true 2>/dev/null || true
-    fi
+    if [ "${INIT_SYSTEM}" = "systemd" ]; then
+        if command -v timedatectl >/dev/null 2>&1; then
+            timedatectl set-ntp true 2>/dev/null || true
+        fi
 
-    if systemctl is-active --quiet systemd-timesyncd 2>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q 'systemd-timesyncd'; then
-        systemctl unmask systemd-timesyncd 2>/dev/null || true
-        systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+        if systemctl is-active --quiet systemd-timesyncd 2>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q 'systemd-timesyncd'; then
+            systemctl unmask systemd-timesyncd 2>/dev/null || true
+            systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+        fi
+    elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+        if command -v chronyd >/dev/null 2>&1; then
+            rc-update add chronyd default >/dev/null 2>&1 || true
+            rc-service chronyd start >/dev/null 2>&1 || true
+        elif command -v ntpd >/dev/null 2>&1; then
+            rc-update add ntpd default >/dev/null 2>&1 || true
+            rc-service ntpd start >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -290,7 +352,25 @@ sync_time() {
 install_pkgs() {
     print_step_header "01/10" "УСТАНОВКА ЗАВИСИМОСТЕЙ И СТЕКА DOCKER"
 
-    if [ "${DISTRO_FAMILY}" = "arch" ]; then
+    if [ "${DISTRO_FAMILY}" = "alpine" ]; then
+        # Включение репозитория community при необходимости
+        if [ -f /etc/apk/repositories ]; then
+            sed -i 's/^#\(.*\/community\)/\1/' /etc/apk/repositories 2>/dev/null || true
+            if ! grep -q 'community' /etc/apk/repositories 2>/dev/null; then
+                sed -i 'p;s/main/community/' /etc/apk/repositories 2>/dev/null || true
+            fi
+        fi
+        run_spin "Обновление индексов пакетов APK" apk update
+
+        local ALP_PKGS=(bash python3 py3-bcrypt iproute2 cryptsetup btrfs-progs ntfs-3g \
+                        util-linux curl openssl ca-certificates jq iptables apache2-utils \
+                        unzip tar sqlite argon2 iputils shadow musl-utils procps e2fsprogs \
+                        docker docker-cli-compose chrony openrc)
+        run_spin "Установка системных пакетов Alpine" \
+            apk add --no-cache "${ALP_PKGS[@]}"
+        apk add --no-cache cryptsetup-openrc 2>/dev/null || true
+
+    elif [ "${DISTRO_FAMILY}" = "arch" ]; then
         local ARCH_PKGS=(python python-bcrypt iproute2 cryptsetup btrfs-progs ntfs-3g util-linux \
                          curl openssl ca-certificates jq iptables unzip tar sqlite \
                          docker docker-compose argon2 iputils acl zram-generator)
@@ -346,14 +426,16 @@ install_pkgs() {
     fi
 
     # Защита накопителя eMMC/SSD: ограничение системного журнала systemd-journald
-    mkdir -p /etc/systemd/journald.conf.d/
-    cat <<EOF_JRNL > /etc/systemd/journald.conf.d/00-homelab.conf
+    if [ "${INIT_SYSTEM}" = "systemd" ]; then
+        mkdir -p /etc/systemd/journald.conf.d/
+        cat <<EOF_JRNL > /etc/systemd/journald.conf.d/00-homelab.conf
 [Journal]
 SystemMaxUse=100M
 RuntimeMaxUse=50M
 Storage=persistent
 EOF_JRNL
-    systemctl restart systemd-journald >/dev/null 2>&1 || true
+        systemctl restart systemd-journald >/dev/null 2>&1 || true
+    fi
 
     # Настройка актуальных зеркал Docker Hub (2026 год, исключен устаревший gcr.io)
     local MODIFIED_DAEMON
@@ -399,12 +481,24 @@ else:
     print('0')
 " 2>/dev/null || echo "0")
 
-    if ! systemctl is-active --quiet docker 2>/dev/null; then
-        run_spin "Активация и запуск службы Docker" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl enable --now docker >/dev/null 2>&1 || true"
-    elif [ "${MODIFIED_DAEMON}" = "1" ]; then
-        run_spin "Обновление конфигурации и перезапуск Docker (актуализированы зеркала)" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl restart docker"
+    if [ "${INIT_SYSTEM}" = "openrc" ]; then
+        rc-update add cgroups boot 2>/dev/null || true
+        rc-update add docker default 2>/dev/null || true
+        if ! rc-service docker status >/dev/null 2>&1; then
+            run_spin "Активация и запуск службы Docker (OpenRC)" rc-service docker start
+        elif [ "${MODIFIED_DAEMON}" = "1" ]; then
+            run_spin "Обновление конфигурации и перезапуск Docker (актуализированы зеркала)" rc-service docker restart
+        else
+            log_ok "Служба Docker активна, зеркала Docker Hub уже настроены"
+        fi
     else
-        log_ok "Служба Docker активна, зеркала Docker Hub уже настроены"
+        if ! systemctl is-active --quiet docker 2>/dev/null; then
+            run_spin "Активация и запуск службы Docker" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl enable --now docker >/dev/null 2>&1 || true"
+        elif [ "${MODIFIED_DAEMON}" = "1" ]; then
+            run_spin "Обновление конфигурации и перезапуск Docker (актуализированы зеркала)" bash -c "systemctl daemon-reload >/dev/null 2>&1 || true && systemctl restart docker"
+        else
+            log_ok "Служба Docker активна, зеркала Docker Hub уже настроены"
+        fi
     fi
 
     # Остановка потенциально конфликтующих старых контейнеров перед переконфигурацией
@@ -427,7 +521,7 @@ else:
     fi
     log_info "Определена версия Docker API: ${DETECTED_DOCKER_API}"
 
-    # Гарантия наличия плагина 'docker compose' (включая Arch Linux)
+    # Гарантия наличия плагина 'docker compose' (включая Arch Linux и Alpine)
     mkdir -p /usr/lib/docker/cli-plugins
     if command -v docker-compose >/dev/null 2>&1 && [ ! -e /usr/lib/docker/cli-plugins/docker-compose ]; then
         ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
@@ -459,8 +553,9 @@ setup_zram() {
     TOTAL_RAM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "2048")
     if [ "${TOTAL_RAM_MB}" -le 4096 ]; then
         log_info "Обнаружен компактный объем RAM (${TOTAL_RAM_MB} МБ). Настройка zRAM..."
-        mkdir -p /etc/systemd/
-        cat << 'EOF_ZRAM_CONF' > /etc/systemd/zram-generator.conf
+        if [ "${INIT_SYSTEM}" = "systemd" ]; then
+            mkdir -p /etc/systemd/
+            cat << 'EOF_ZRAM_CONF' > /etc/systemd/zram-generator.conf
 [zram0]
 zram-size = min(ram / 2, 2048)
 compression-algorithm = zstd
@@ -468,9 +563,41 @@ swap-priority = 100
 fs-type = swap
 EOF_ZRAM_CONF
 
-        if systemctl list-unit-files 2>/dev/null | grep -q "systemd-zram-setup"; then
-            systemctl daemon-reload >/dev/null 2>&1 || true
-            systemctl start dev-zram0.swap 2>/dev/null || systemctl start /dev/zram0 2>/dev/null || true
+            if systemctl list-unit-files 2>/dev/null | grep -q "systemd-zram-setup"; then
+                systemctl daemon-reload >/dev/null 2>&1 || true
+                systemctl start dev-zram0.swap 2>/dev/null || systemctl start /dev/zram0 2>/dev/null || true
+            fi
+        elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+            cat << 'EOF_ZRAM_RC' > /etc/init.d/zram-swap
+#!/sbin/openrc-run
+description="zRAM Swap Activation"
+depend() {
+    after localmount
+}
+start() {
+    ebegin "Activating zRAM swap"
+    modprobe zram 2>/dev/null || true
+    if command -v zramctl >/dev/null 2>&1; then
+        ZDEV=$(zramctl --find --size 1024M --algorithm zstd 2>/dev/null || zramctl --find --size 1024M 2>/dev/null || true)
+        if [ -n "${ZDEV}" ]; then
+            mkswap "${ZDEV}" >/dev/null 2>&1
+            swapon -p 100 "${ZDEV}" >/dev/null 2>&1
+            sysctl -w vm.swappiness=150 >/dev/null 2>&1 || true
+        fi
+    fi
+    eend 0
+}
+stop() {
+    ebegin "Deactivating zRAM swap"
+    for zd in $(lsblk -lno NAME,TYPE 2>/dev/null | awk '$2=="zram"{print "/dev/"$1}'); do
+        swapoff "$zd" 2>/dev/null || true
+        zramctl -r "$zd" 2>/dev/null || true
+    done
+    eend 0
+}
+EOF_ZRAM_RC
+            chmod 755 /etc/init.d/zram-swap
+            rc-update add zram-swap default >/dev/null 2>&1 || true
         fi
 
         if ! swapon --show 2>/dev/null | grep -q "zram"; then
@@ -486,7 +613,7 @@ EOF_ZRAM_CONF
                 fi
             fi
         else
-            log_ok "zRAM активен и сконфигурирован через systemd-zram-generator"
+            log_ok "zRAM активен и сконфигурирован"
         fi
     fi
 
@@ -499,7 +626,7 @@ EOF_ZRAM_CONF
         if [ ! -f /swapfile ] && [ "${AVAIL_DISK_MB}" -ge 3000 ]; then
             log_info "Создание дополнительного файла подкачки (1.5 ГБ Swapfile) для защиты от OOM..."
             local ROOT_FSTYPE
-            ROOT_FSTYPE=$(findmnt -n -o FSTYPE / 2>/dev/null || echo "ext4")
+            ROOT_FSTYPE=$(findmnt -n -o FSTYPE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2{print $1}' || echo "ext4")
 
             if [ "${ROOT_FSTYPE}" = "btrfs" ] && command -v btrfs >/dev/null 2>&1; then
                 btrfs filesystem mkswapfile --size 1536M /swapfile 2>/dev/null || {
@@ -563,21 +690,23 @@ detect_network() {
     REAL_USER="${SUDO_USER:-$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}' /etc/passwd 2>/dev/null || echo "homelab")}"
     TARGET_USER="${SAVED_TARGET_USER:-${REAL_USER:-homelab}}"
     if ! id -u "${TARGET_USER}" >/dev/null 2>&1; then
-        useradd -m -U -s /bin/bash "${TARGET_USER}" 2>/dev/null || useradd -m -s /bin/bash "${TARGET_USER}"
+        useradd -m -U -s /bin/bash "${TARGET_USER}" 2>/dev/null || \
+        useradd -m -s /bin/bash "${TARGET_USER}" 2>/dev/null || \
+        adduser -D -s /bin/bash "${TARGET_USER}" 2>/dev/null || true
     fi
     USER_UID=$(id -u "${TARGET_USER}")
     USER_GID=$(id -g "${TARGET_USER}")
 
     # БЕЗОПАСНОСТЬ: Добавляем пользователя в группу docker без небезопасных прав 666 на сокет
-    getent group docker >/dev/null 2>&1 || groupadd -r docker 2>/dev/null || true
-    usermod -aG docker "${TARGET_USER}" 2>/dev/null || true
+    getent group docker >/dev/null 2>&1 || grep -q '^docker:' /etc/group 2>/dev/null || groupadd -r docker 2>/dev/null || addgroup -S docker 2>/dev/null || true
+    usermod -aG docker "${TARGET_USER}" 2>/dev/null || adduser "${TARGET_USER}" docker 2>/dev/null || addgroup "${TARGET_USER}" docker 2>/dev/null || true
     if [ -S /var/run/docker.sock ]; then
         chown root:docker /var/run/docker.sock 2>/dev/null || true
         chmod 660 /var/run/docker.sock 2>/dev/null || true
     fi
 
     log_ok "Сетевые параметры определены:"
-    echo -e "      ${CLR_WHITE}• ОС и ядро:        ${PRETTY_NAME:-Linux} ($(uname -r))${CLR_RESET}"
+    echo -e "      ${CLR_WHITE}• ОС и ядро:        ${PRETTY_NAME:-Linux} ($(uname -r)) [Init: ${INIT_SYSTEM}]${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• IP сервера:       ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• Шлюз роутера:     ${CLR_CYAN}${ROUTER_GATEWAY}${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• Интерфейс LAN:    ${CLR_YELLOW}${DEFAULT_IFACE}${CLR_RESET}"
@@ -799,13 +928,28 @@ prompt_configuration() {
         fi
 
         log_info "Остановка системных служб и таймеров..."
-        systemctl disable --now homelab.service 2>/dev/null || true
-        systemctl disable --now network-gateway-watchdog.timer 2>/dev/null || true
-        systemctl disable --now network-gateway-watchdog.service 2>/dev/null || true
-        systemctl disable --now vaultwarden-backup.timer 2>/dev/null || true
-        systemctl disable --now vaultwarden-backup.service 2>/dev/null || true
-        systemctl disable --now gitea-backup.timer 2>/dev/null || true
-        systemctl disable --now gitea-backup.service 2>/dev/null || true
+        if [ "${INIT_SYSTEM}" = "systemd" ]; then
+            systemctl disable --now homelab.service 2>/dev/null || true
+            systemctl disable --now network-gateway-watchdog.timer 2>/dev/null || true
+            systemctl disable --now network-gateway-watchdog.service 2>/dev/null || true
+            systemctl disable --now vaultwarden-backup.timer 2>/dev/null || true
+            systemctl disable --now vaultwarden-backup.service 2>/dev/null || true
+            systemctl disable --now gitea-backup.timer 2>/dev/null || true
+            systemctl disable --now gitea-backup.service 2>/dev/null || true
+            rm -f /etc/systemd/system/homelab.service /etc/systemd/system/network-gateway-watchdog.* /etc/systemd/system/vaultwarden-backup.* /etc/systemd/system/gitea-backup.*
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+            rc-service homelab stop 2>/dev/null || true
+            rc-update del homelab default 2>/dev/null || true
+            rc-service homelab-storage stop 2>/dev/null || true
+            rc-update del homelab-storage boot 2>/dev/null || true
+            rc-update del homelab-storage default 2>/dev/null || true
+            rc-service zram-swap stop 2>/dev/null || true
+            rc-update del zram-swap default 2>/dev/null || true
+            rm -f /etc/init.d/homelab /etc/init.d/homelab-storage /etc/init.d/zram-swap
+            sed -i '/backup_vaultwarden\.sh/d; /backup_gitea\.sh/d; /gateway-watchdog\.sh/d' /etc/crontabs/root 2>/dev/null || true
+            touch /etc/crontabs/cron.update 2>/dev/null || true
+        fi
 
         log_info "Остановка и удаление контейнеров Docker..."
         if [ -d "${APP_DIR}" ]; then
@@ -832,12 +976,10 @@ prompt_configuration() {
         fi
 
         rm -f /usr/local/bin/gateway-watchdog.sh /usr/local/bin/homelab-unlock
-        rm -f /etc/systemd/system/homelab.service /etc/systemd/system/network-gateway-watchdog.* /etc/systemd/system/vaultwarden-backup.* /etc/systemd/system/gitea-backup.*
         rm -f /opt/homelab/diagnostic_report.log
         local USER_HOME
         USER_HOME=$(eval echo ~"${TARGET_USER}" 2>/dev/null || echo "/home/${TARGET_USER}")
         rm -f "${USER_HOME}/diagnostic_report.log" 2>/dev/null || true
-        systemctl daemon-reload >/dev/null 2>&1 || true
 
         log_info "Восстановление стандартных записей в /etc/hosts..."
         sed -i '/\.lan$/d' /etc/hosts 2>/dev/null || true
@@ -1052,8 +1194,40 @@ prompt_configuration() {
                 echo "${MAPPER_DEV} ${MOUNT_ROOT} ${DEV_FSTYPE} ${MOUNT_OPTS} 0 0" >> /etc/fstab
             fi
 
+            if [ "${INIT_SYSTEM}" = "openrc" ]; then
+                cat << EOF_CRYPT_RC > /etc/init.d/homelab-storage
+#!/sbin/openrc-run
+description="Homelab Encrypted Storage Unlock & Mount"
+depend() {
+    before docker homelab
+    after localmount
+}
+start() {
+    ebegin "Unlocking and mounting homelab storage"
+    if [ ! -e "${MAPPER_DEV}" ] && [ -f "${KEY_FILE}" ]; then
+        cryptsetup open "${CHOSEN_DEV}" "${LUKS_MAP_NAME}" --key-file "${KEY_FILE}"
+    fi
+    mkdir -p "${MOUNT_ROOT}"
+    mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
+    eend $?
+}
+stop() {
+    ebegin "Unmounting and closing homelab storage"
+    if mountpoint -q "${MOUNT_ROOT}"; then
+        umount -R "${MOUNT_ROOT}" 2>/dev/null || true
+    fi
+    if [ -e "${MAPPER_DEV}" ]; then
+        cryptsetup close "${LUKS_MAP_NAME}" 2>/dev/null || true
+    fi
+    eend 0
+}
+EOF_CRYPT_RC
+                chmod 755 /etc/init.d/homelab-storage
+                rc-update add homelab-storage boot >/dev/null 2>&1 || rc-update add homelab-storage default >/dev/null 2>&1 || true
+            fi
+
             STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
-            log_ok "Авторазблокировка успешно настроена в crypttab и fstab!"
+            log_ok "Авторазблокировка успешно настроена!"
 
             cat << EOF_UNLOCK > /usr/local/bin/homelab-unlock
 #!/usr/bin/env bash
@@ -1232,6 +1406,7 @@ EOF_UNLOCK
         printf "SAVED_VAULT_DATA_DIR=%q\n" "${VAULT_DATA_DIR}"
         printf "SAVED_GITEA_DATA_DIR=%q\n" "${GITEA_DATA_DIR}"
         printf "SAVED_ADGUARD_WORK_DIR=%q\n" "${ADGUARD_WORK_DIR}"
+        printf "SAVED_INIT_SYSTEM=%q\n" "${INIT_SYSTEM}"
     } > "${ENV_FILE}"
     chmod 600 "${ENV_FILE}"
     chown root:root "${ENV_FILE}" 2>/dev/null || true
@@ -1247,6 +1422,7 @@ setup_credentials() {
     modprobe tun 2>/dev/null || true
     mkdir -p /etc/modules-load.d
     echo "tun" > /etc/modules-load.d/tun.conf
+    grep -q '^tun$' /etc/modules 2>/dev/null || echo "tun" >> /etc/modules 2>/dev/null || true
 
     log_info "Хэширование пароля AdGuard Home (Bcrypt)..."
     AGH_HASH=""
@@ -1276,15 +1452,9 @@ sys.exit(1)
         AGH_HASH=$(printf '%s\n' "${AGH_PASS}" | htpasswd -B -C 10 -n -i "${ADMIN_USER}" 2>/dev/null | cut -d: -f2 || true)
     fi
 
-    # 3. Fallback на Docker Caddy
-    if [ -z "${AGH_HASH}" ] && command -v docker >/dev/null 2>&1; then
-        AGH_HASH=$(docker run --rm "caddy:alpine" caddy hash-password --plaintext "${AGH_PASS}" 2>/dev/null | tr -d '\r\n' || true)
-    fi
-
     # 3. Fallback на Docker Caddy (передача пароля через stdin без утечки в ps aux)
     if [ -z "${AGH_HASH}" ] && command -v docker >/dev/null 2>&1; then
-        AGH_HASH=$(printf '%s' "${AGH_PASS}" | docker run -i --rm "caddy:alpine" caddy hash-password 2>/dev/null | tr -d '
-' || true)
+        AGH_HASH=$(printf '%s' "${AGH_PASS}" | docker run -i --rm "caddy:alpine" caddy hash-password 2>/dev/null | tr -d '\r\n' || true)
     fi
 
     if [ -z "${AGH_HASH}" ]; then
@@ -1322,8 +1492,8 @@ setup_gateway_networking() {
     print_step_header "05/10" "МАРШРУТИЗАЦИЯ, IPTABLES И ЗАЩИТА ОТ ПЕТЕЛЬ"
 
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        log_info "Освобождение порта 53 (отключение DNSStubListener в systemd-resolved)..."
-        if systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]; then
+        log_info "Освобождение порта 53 (отключение DNSStubListener при наличии)..."
+        if [ "${INIT_SYSTEM}" = "systemd" ] && (systemctl is-active --quiet systemd-resolved 2>/dev/null || [ -d /etc/systemd/resolved.conf.d ]); then
             mkdir -p /etc/systemd/resolved.conf.d/
             cat <<EOF_RESOLVED > /etc/systemd/resolved.conf.d/disable-stub.conf
 [Resolve]
@@ -1353,6 +1523,7 @@ EOF_DNS
         modprobe tcp_bbr 2>/dev/null || true
         mkdir -p /etc/modules-load.d
         echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+        grep -q '^tcp_bbr$' /etc/modules 2>/dev/null || echo "tcp_bbr" >> /etc/modules 2>/dev/null || true
 
         log_info "Настройка sysctl: IP-форвардинг, BBR и loose rp_filter для TUN-маршрутизации..."
         cat <<EOF_SYSCTL > /etc/sysctl.d/99-gateway.conf
@@ -1370,7 +1541,7 @@ net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.default.rp_filter = 2
 net.ipv4.conf.${DEFAULT_IFACE}.rp_filter = 2
 EOF_SYSCTL
-        sysctl --system >/dev/null 2>&1 || true
+        sysctl -p /etc/sysctl.d/99-gateway.conf 2>/dev/null || sysctl --system >/dev/null 2>&1 || true
         sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 net.ipv6.conf.lo.disable_ipv6=1 >/dev/null 2>&1 || true
 
         if command -v nmcli >/dev/null 2>&1 && [ -n "${DEFAULT_IFACE}" ]; then
@@ -1379,7 +1550,7 @@ EOF_SYSCTL
         iptables -P FORWARD ACCEPT 2>/dev/null || true
         if [ -n "${DEFAULT_IFACE}" ]; then
             iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || \
-            iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE
+            iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || true
             # Блокировка прямого незашифрованного доступа к AdGuard 8083 из LAN (доступ строго через Caddy)
             iptables -C INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 8083 -j DROP 2>/dev/null || \
             iptables -A INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 8083 -j DROP 2>/dev/null || true
@@ -1433,7 +1604,8 @@ fi
 EOF_WATCHDOG
         chmod 750 /usr/local/bin/gateway-watchdog.sh
 
-        cat <<EOF_WD_SVC > /etc/systemd/system/network-gateway-watchdog.service
+        if [ "${INIT_SYSTEM}" = "systemd" ]; then
+            cat <<EOF_WD_SVC > /etc/systemd/system/network-gateway-watchdog.service
 [Unit]
 Description=Gateway Auto-Discovery and Loop Recovery Watchdog
 After=network.target
@@ -1443,7 +1615,7 @@ Type=oneshot
 ExecStart=/usr/local/bin/gateway-watchdog.sh
 EOF_WD_SVC
 
-        cat <<EOF_WD_TMR > /etc/systemd/system/network-gateway-watchdog.timer
+            cat <<EOF_WD_TMR > /etc/systemd/system/network-gateway-watchdog.timer
 [Unit]
 Description=Run Gateway Loop Watchdog periodically
 
@@ -1456,8 +1628,17 @@ AccuracySec=5s
 WantedBy=timers.target
 EOF_WD_TMR
 
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable --now network-gateway-watchdog.timer >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable --now network-gateway-watchdog.timer >/dev/null 2>&1 || true
+        elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+            mkdir -p /etc/crontabs
+            if ! grep -q 'gateway-watchdog.sh' /etc/crontabs/root 2>/dev/null; then
+                echo "* * * * * /usr/local/bin/gateway-watchdog.sh >/dev/null 2>&1" >> /etc/crontabs/root
+            fi
+            touch /etc/crontabs/cron.update 2>/dev/null || true
+            rc-update add crond default >/dev/null 2>&1 || true
+            rc-service crond start >/dev/null 2>&1 || rc-service crond restart >/dev/null 2>&1 || true
+        fi
     fi
 
     log_info "Регистрация локальных доменов в /etc/hosts..."
@@ -2478,14 +2659,15 @@ EOF_COMPOSE
       - WATCHTOWER_TIMEOUT=30s
 EOF_COMPOSE
 
-    local WATCHDOG_EXEC_LINE=""
-    if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        WATCHDOG_EXEC_LINE="ExecStartPre=/usr/local/bin/gateway-watchdog.sh
+    if [ "${INIT_SYSTEM}" = "systemd" ]; then
+        local WATCHDOG_EXEC_LINE=""
+        if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+            WATCHDOG_EXEC_LINE="ExecStartPre=/usr/local/bin/gateway-watchdog.sh
 ExecStartPre=/bin/sh -c 'iptables -P FORWARD ACCEPT'
 ExecStartPre=/bin/sh -c 'iptables -t nat -C POSTROUTING -o \"${DEFAULT_IFACE}\" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o \"${DEFAULT_IFACE}\" -j MASQUERADE'"
-    fi
+        fi
 
-    cat <<EOF_HOMELAB_SVC > /etc/systemd/system/homelab.service
+        cat <<EOF_HOMELAB_SVC > /etc/systemd/system/homelab.service
 [Unit]
 Description=Homelab Docker Compose Stack
 Requires=docker.service
@@ -2506,9 +2688,44 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF_HOMELAB_SVC
 
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable homelab.service >/dev/null 2>&1 || true
-    log_ok "Caddyfile, docker-compose.yml и homelab.service успешно сформированы"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable homelab.service >/dev/null 2>&1 || true
+
+    elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+        cat <<EOF_HOMELAB_RC > /etc/init.d/homelab
+#!/sbin/openrc-run
+description="Homelab Docker Compose Stack"
+depend() {
+    need docker
+    after docker homelab-storage network
+}
+start() {
+    ebegin "Starting Homelab Docker Compose Stack"
+    /usr/local/bin/gateway-watchdog.sh 2>/dev/null || true
+    iptables -P FORWARD ACCEPT 2>/dev/null || true
+    if [ -n "${DEFAULT_IFACE:-}" ]; then
+        iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || true
+    fi
+    cd "${APP_DIR}" && /usr/local/bin/dc up -d
+    eend $?
+}
+stop() {
+    ebegin "Stopping Homelab Docker Compose Stack"
+    cd "${APP_DIR}" && /usr/local/bin/dc stop
+    eend $?
+}
+restart() {
+    ebegin "Restarting Homelab Docker Compose Stack"
+    cd "${APP_DIR}" && /usr/local/bin/dc restart
+    eend $?
+}
+EOF_HOMELAB_RC
+        chmod 755 /etc/init.d/homelab
+        rc-update add homelab default >/dev/null 2>&1 || true
+    fi
+
+    log_ok "Caddyfile, docker-compose.yml и служба автозапуска успешно сформированы"
 }
 
 # =============================================================================
@@ -2552,7 +2769,8 @@ fi
 EOF_BACKUP
         chmod 750 "${APP_DIR}/backup_vaultwarden.sh"
 
-        cat <<EOF_BKP_SVC > /etc/systemd/system/vaultwarden-backup.service
+        if [ "${INIT_SYSTEM}" = "systemd" ]; then
+            cat <<EOF_BKP_SVC > /etc/systemd/system/vaultwarden-backup.service
 [Unit]
 Description=Vaultwarden Database Backup
 After=network.target
@@ -2562,7 +2780,7 @@ Type=oneshot
 ExecStart=${APP_DIR}/backup_vaultwarden.sh
 EOF_BKP_SVC
 
-        cat <<EOF_BKP_TMR > /etc/systemd/system/vaultwarden-backup.timer
+            cat <<EOF_BKP_TMR > /etc/systemd/system/vaultwarden-backup.timer
 [Unit]
 Description=Daily Vaultwarden Database Backup Timer
 
@@ -2574,8 +2792,17 @@ Persistent=true
 WantedBy=timers.target
 EOF_BKP_TMR
 
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable --now vaultwarden-backup.timer >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable --now vaultwarden-backup.timer >/dev/null 2>&1 || true
+        elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+            mkdir -p /etc/crontabs
+            if ! grep -q 'backup_vaultwarden.sh' /etc/crontabs/root 2>/dev/null; then
+                echo "0 3 * * * ${APP_DIR}/backup_vaultwarden.sh >/dev/null 2>&1" >> /etc/crontabs/root
+            fi
+            touch /etc/crontabs/cron.update 2>/dev/null || true
+            rc-update add crond default >/dev/null 2>&1 || true
+            rc-service crond start >/dev/null 2>&1 || rc-service crond restart >/dev/null 2>&1 || true
+        fi
     fi
 
     if [[ "${ENABLE_GITEA}" =~ ^[Yy]$ ]]; then
@@ -2608,7 +2835,8 @@ fi
 EOF_GITEA_BKP
         chmod 750 "${APP_DIR}/backup_gitea.sh"
 
-        cat <<EOF_GITEA_BKP_SVC > /etc/systemd/system/gitea-backup.service
+        if [ "${INIT_SYSTEM}" = "systemd" ]; then
+            cat <<EOF_GITEA_BKP_SVC > /etc/systemd/system/gitea-backup.service
 [Unit]
 Description=Gitea Repositories & Database Backup
 After=network.target docker.service
@@ -2618,7 +2846,7 @@ Type=oneshot
 ExecStart=${APP_DIR}/backup_gitea.sh
 EOF_GITEA_BKP_SVC
 
-        cat <<EOF_GITEA_BKP_TMR > /etc/systemd/system/gitea-backup.timer
+            cat <<EOF_GITEA_BKP_TMR > /etc/systemd/system/gitea-backup.timer
 [Unit]
 Description=Daily Gitea Database and Repositories Backup Timer
 
@@ -2630,8 +2858,17 @@ Persistent=true
 WantedBy=timers.target
 EOF_GITEA_BKP_TMR
 
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable --now gitea-backup.timer >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable --now gitea-backup.timer >/dev/null 2>&1 || true
+        elif [ "${INIT_SYSTEM}" = "openrc" ]; then
+            mkdir -p /etc/crontabs
+            if ! grep -q 'backup_gitea.sh' /etc/crontabs/root 2>/dev/null; then
+                echo "30 3 * * * ${APP_DIR}/backup_gitea.sh >/dev/null 2>&1" >> /etc/crontabs/root
+            fi
+            touch /etc/crontabs/cron.update 2>/dev/null || true
+            rc-update add crond default >/dev/null 2>&1 || true
+            rc-service crond start >/dev/null 2>&1 || rc-service crond restart >/dev/null 2>&1 || true
+        fi
     fi
 
     cd "${APP_DIR}"
@@ -2727,6 +2964,7 @@ diagnose_and_verify_system() {
                   Дата и время: $(date '+%Y-%m-%d %H:%M:%S %Z')
 =============================================================================
 Дистрибутив:       ${PRETTY_NAME:-Linux} ($(uname -r))
+Init-система:      ${INIT_SYSTEM}
 IP сервера:        ${LOCAL_IP}
 Шлюз:              ${ROUTER_GATEWAY}
 Интерфейс:         ${DEFAULT_IFACE}
@@ -2949,10 +3187,13 @@ show_summary_dashboard() {
     echo -e "  ${CLR_GREEN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
 
+    local RESTART_CMD="sudo systemctl restart homelab.service"
+    [ "${INIT_SYSTEM}" = "openrc" ] && RESTART_CMD="sudo rc-service homelab restart"
+
     echo -e "  ${CLR_CYAN}${CLR_BOLD}╭── БЫСТРЫЕ КОМАНДЫ УПРАВЛЕНИЯ ───────────────────────────────${CLR_RESET}"
     echo -e "  ${CLR_WHITE}• Статус контейнеров:${CLR_RESET}           ${CLR_CYAN}dc ps${CLR_RESET}"
     echo -e "  ${CLR_WHITE}• Просмотр логов в реалтайме:${CLR_RESET}   ${CLR_CYAN}dc logs -f [сервис]${CLR_RESET}"
-    echo -e "  ${CLR_WHITE}• Перезапуск всего комплекса:${CLR_RESET}   ${CLR_CYAN}sudo systemctl restart homelab.service${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}• Перезапуск всего комплекса:${CLR_RESET}   ${CLR_CYAN}${RESTART_CMD}${CLR_RESET}"
     echo -e "  ${CLR_WHITE}• Отчет диагностики:${CLR_RESET}            ${CLR_CYAN}cat /opt/homelab/diagnostic_report.log${CLR_RESET}"
     echo -e "  ${CLR_CYAN}${CLR_BOLD}╰─────────────────────────────────────────────────────────────${CLR_RESET}"
     echo ""
