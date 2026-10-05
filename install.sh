@@ -1,42 +1,54 @@
 #!/usr/bin/env bash
-# Self-bootstrap into bash if started under /bin/sh (common on Alpine Linux)
-if [ -z "${BASH_VERSION:-}" ]; then
-    if command -v bash >/dev/null 2>&1; then
-        exec bash "$0" "$@"
-    else
-        echo "[!] Bash is required for this installer." >&2
-        if command -v apk >/dev/null 2>&1; then
-            echo "[*] Installing bash via apk..." >&2
-            apk add --no-cache bash
-            exec bash "$0" "$@"
-        elif command -v apt-get >/dev/null 2>&1; then
-            echo "[*] Installing bash via apt-get..." >&2
-            apt-get update && apt-get install -y bash
-            exec bash "$0" "$@"
-        elif command -v pacman >/dev/null 2>&1; then
-            echo "[*] Installing bash via pacman..." >&2
-            pacman -Sy --noconfirm bash
-            exec bash "$0" "$@"
-        else
-            echo "[-] Error: Bash is not installed. Please install bash and re-run." >&2
-            exit 1
-        fi
-    fi
-fi
-
-set -euo pipefail
-
 # =============================================================================
 # Project: Homelab Appliance & Transparent Gateway (Kaxa Enterprise Edition 2026)
 # Enterprise & Homelab Unified Gateway | Linux 2026 Ecosystem & Docker 28+ / 29+
 # Supported OS: Debian 13 (Trixie), Ubuntu 26.04 LTS (Resolute), Arch Linux,
 #               Alpine Linux v3.19+ (OpenRC)
 #   (Compatibility Mode: Debian 12+, Ubuntu 24.04+, Alpine Linux v3.18+)
-# Components: AdGuard Home (v0.107+ Schema 34), Mihomo TUN (Smart Routing & MRS Rulesets),
+# Components: AdGuard Home (Schema 34+), Mihomo TUN (Smart Routing & MRS Rulesets),
 #             Vaultwarden (Argon2id), Gitea (Git-Server), Samba (WSDD2),
 #             qBittorrent (VueTorrent WebUI), MeTube (yt-dlp), Caddy (Internal/DuckDNS SSL),
-#             Watchtower (Docker API 1.45+ / 1.50+ Auto-Negotiated)
+#             Watchtower (Docker API 1.45+ Auto-Negotiated)
 # =============================================================================
+
+# Self-bootstrap into bash if started under /bin/sh or via pipe (curl | sh)
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        if [ -f "$0" ]; then
+            exec bash "$0" "$@"
+        else
+            TMP_SCRIPT=$(mktemp /tmp/homelab_bootstrap_XXXXXX.sh)
+            cat > "${TMP_SCRIPT}"
+            chmod +x "${TMP_SCRIPT}"
+            exec bash "${TMP_SCRIPT}" "$@"
+        fi
+    else
+        echo "[!] Bash is required for this installer." >&2
+        if command -v apk >/dev/null 2>&1; then
+            echo "[*] Installing bash via apk..." >&2
+            apk add --no-cache bash
+        elif command -v apt-get >/dev/null 2>&1; then
+            echo "[*] Installing bash via apt-get..." >&2
+            apt-get update && apt-get install -y bash
+        elif command -v pacman >/dev/null 2>&1; then
+            echo "[*] Installing bash via pacman..." >&2
+            pacman -Sy --noconfirm bash
+        else
+            echo "[-] Error: Bash is not installed. Please install bash and re-run." >&2
+            exit 1
+        fi
+        if [ -f "$0" ]; then
+            exec bash "$0" "$@"
+        else
+            TMP_SCRIPT=$(mktemp /tmp/homelab_bootstrap_XXXXXX.sh)
+            cat > "${TMP_SCRIPT}"
+            chmod +x "${TMP_SCRIPT}"
+            exec bash "${TMP_SCRIPT}" "$@"
+        fi
+    fi
+fi
+
+set -Eeuo pipefail
 
 # --- ЦВЕТОВАЯ ПАЛИТРА И СТИЛЬ ОФОРМЛЕНИЯ ---
 CLR_RESET="\033[0m"
@@ -72,7 +84,7 @@ print_step_header() {
 CURRENT_SPIN_PID=""
 CURRENT_SPIN_LOG=""
 
-# Анимированный спиннер с надежной защитой от утечки курсора при сбоях и сигналах
+# Анимированный спиннер с защитой от утечки курсора и TTY-адаптацией (стандарт 2026)
 run_spin() {
     local full_msg="$1"
     shift
@@ -80,11 +92,31 @@ run_spin() {
     local disp_msg="${full_msg:0:$max_len}"
     [ ${#full_msg} -gt $max_len ] && disp_msg="${disp_msg}..."
 
-    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local log_tmp
     log_tmp=$(mktemp)
     CURRENT_SPIN_LOG="${log_tmp}"
 
+    # Если запуск в неинтерактивном режиме (без TTY / пайплайны), отключаем спецсимволы
+    if [ ! -t 1 ]; then
+        local exit_code=0
+        "$@" >"${log_tmp}" 2>&1 || exit_code=$?
+        if [ $exit_code -eq 0 ]; then
+            printf "  ${CLR_GREEN}✔${CLR_RESET} ${CLR_WHITE}%-45s${CLR_RESET} ${CLR_GREEN}[ГОТОВО]${CLR_RESET}\n" "${disp_msg}"
+            rm -f "${log_tmp}"
+            CURRENT_SPIN_LOG=""
+            return 0
+        else
+            printf "  ${CLR_RED}✖${CLR_RESET} ${CLR_WHITE}%-45s${CLR_RESET} ${CLR_RED}[СБОЙ]${CLR_RESET}\n" "${disp_msg}"
+            echo -e "${CLR_RED}--- Журнал ошибки (${full_msg}): ---${CLR_RESET}" >&2
+            tail -n 35 "${log_tmp}" >&2
+            echo -e "${CLR_RED}-----------------------------------${CLR_RESET}" >&2
+            rm -f "${log_tmp}"
+            CURRENT_SPIN_LOG=""
+            return $exit_code
+        fi
+    fi
+
+    local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     "$@" >"${log_tmp}" 2>&1 &
     local pid=$!
     CURRENT_SPIN_PID="$pid"
@@ -156,12 +188,20 @@ dc() {
     elif command -v docker-compose >/dev/null 2>&1; then
         docker-compose "$@"
     elif [ -x /usr/lib/docker/cli-plugins/docker-compose ]; then
-        docker compose "$@"
+        /usr/lib/docker/cli-plugins/docker-compose "$@"
+    elif [ -x /usr/libexec/docker/cli-plugins/docker-compose ]; then
+        /usr/libexec/docker/cli-plugins/docker-compose "$@"
     else
         docker compose "$@"
     fi
 }
 export -f dc 2>/dev/null || true
+
+# Безопасное экранирование строк для YAML (двойные кавычки)
+yaml_escape() {
+    local str="$1"
+    python3 -c "import sys, json; print(json.dumps(sys.argv[1]))" "${str}" 2>/dev/null || printf '"%s"' "${str//\"/\\\"}"
+}
 
 # Глобальные переменные окружения
 APP_DIR="/opt/homelab"
@@ -188,6 +228,15 @@ GITEA_DATA_DIR=""
 ADGUARD_WORK_DIR=""
 DISTRO_FAMILY=""
 INIT_SYSTEM="systemd"
+SYSTEM_ARCH=""
+HAS_HARDWARE_AES=0
+SELECTED_DOH_1=""
+SELECTED_DOH_2=""
+SELECTED_DOH_3=""
+SELECTED_DOT_1=""
+SELECTED_DOT_2=""
+SELECTED_BOOTSTRAP_IPS="77.88.8.8 1.1.1.1 9.9.9.9 8.8.8.8"
+SELECTED_BOOTSTRAP_IP_1="77.88.8.8"
 
 show_banner() {
     clear 2>/dev/null || true
@@ -215,6 +264,19 @@ check_privileges() {
         exit 1
     fi
     [ -c /dev/tty ] && exec < /dev/tty || true
+}
+
+detect_hardware_capabilities() {
+    SYSTEM_ARCH=$(uname -m 2>/dev/null || echo "x86_64")
+    HAS_HARDWARE_AES=0
+    if grep -q -E '(aes|pmull|armv8-ce)' /proc/cpuinfo 2>/dev/null; then
+        HAS_HARDWARE_AES=1
+    fi
+    local CPU_CORES
+    CPU_CORES=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)
+    local RAM_MB
+    RAM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo 2048)
+    log_info "Аппаратная платформа: ${SYSTEM_ARCH} (${CPU_CORES} CPU, ${RAM_MB} МБ RAM, Аппаратный AES: $([ $HAS_HARDWARE_AES -eq 1 ] && echo "Да" || echo "Нет/Софт"))"
 }
 
 detect_os() {
@@ -295,6 +357,13 @@ load_previous_config() {
             SAMBA_PASS="${SAVED_MASTER_PASS}"
             AGH_PASS="${SAVED_MASTER_PASS}"
         fi
+        [ -n "${SAVED_SELECTED_DOH_1:-}" ] && SELECTED_DOH_1="${SAVED_SELECTED_DOH_1}"
+        [ -n "${SAVED_SELECTED_DOH_2:-}" ] && SELECTED_DOH_2="${SAVED_SELECTED_DOH_2}"
+        [ -n "${SAVED_SELECTED_DOH_3:-}" ] && SELECTED_DOH_3="${SAVED_SELECTED_DOH_3}"
+        [ -n "${SAVED_SELECTED_DOT_1:-}" ] && SELECTED_DOT_1="${SAVED_SELECTED_DOT_1}"
+        [ -n "${SAVED_SELECTED_DOT_2:-}" ] && SELECTED_DOT_2="${SAVED_SELECTED_DOT_2}"
+        [ -n "${SAVED_SELECTED_BOOTSTRAP_IPS:-}" ] && SELECTED_BOOTSTRAP_IPS="${SAVED_SELECTED_BOOTSTRAP_IPS}"
+        [ -n "${SAVED_SELECTED_BOOTSTRAP_IP_1:-}" ] && SELECTED_BOOTSTRAP_IP_1="${SAVED_SELECTED_BOOTSTRAP_IP_1}"
     fi
 }
 
@@ -350,7 +419,7 @@ sync_time() {
 # 1. УСТАНОВКА ЗАВИСИМОСТЕЙ И DOCKER CE
 # =============================================================================
 install_pkgs() {
-    print_step_header "01/10" "УСТАНОВКА ЗАВИСИМОСТЕЙ И СТЕКА DOCKER"
+    print_step_header "01/11" "УСТАНОВКА ЗАВИСИМОСТЕЙ И СТЕКА DOCKER"
 
     if [ "${DISTRO_FAMILY}" = "alpine" ]; then
         # Включение репозитория community при необходимости
@@ -506,25 +575,36 @@ else:
         docker stop mihomo adguardhome 2>/dev/null || true
     fi
 
-    # Определение версии Docker API для Watchtower и Compose (контроль минимума 1.45 для Docker 28+/29+)
+    # Определение и авто-согласование версии Docker API для Watchtower
     DETECTED_DOCKER_API=$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || echo "1.45")
     if [ -z "${DETECTED_DOCKER_API}" ]; then
         DETECTED_DOCKER_API="1.45"
     else
-        local API_MAJOR_MINOR
-        API_MAJOR_MINOR=$(echo "${DETECTED_DOCKER_API}" | cut -d. -f1,2)
-        local API_FLOAT
-        API_FLOAT=$(python3 -c "import sys; print(float('${API_MAJOR_MINOR}'))" 2>/dev/null || echo "1.45")
-        local IS_OLD
-        IS_OLD=$(python3 -c "import sys; print(1 if float('${API_FLOAT}') < 1.44 else 0)" 2>/dev/null || echo "0")
-        [ "${IS_OLD}" -eq 1 ] && DETECTED_DOCKER_API="1.45"
+        # Ограничение (clamp) до 1.45 для совместимости с Watchtower
+        DETECTED_DOCKER_API=$(python3 -c "
+import sys
+api = '${DETECTED_DOCKER_API}'
+try:
+    major, minor = [int(x) for x in api.split('.')[:2]]
+    if major > 1 or (major == 1 and minor > 45):
+        print('1.45')
+    elif major == 1 and minor < 40:
+        print('1.40')
+    else:
+        print(f'{major}.{minor}')
+except Exception:
+    print('1.45')
+" 2>/dev/null || echo "1.45")
     fi
-    log_info "Определена версия Docker API: ${DETECTED_DOCKER_API}"
+    log_info "Согласована стабильная версия Docker API: ${DETECTED_DOCKER_API}"
 
     # Гарантия наличия плагина 'docker compose' (включая Arch Linux и Alpine)
-    mkdir -p /usr/lib/docker/cli-plugins
-    if command -v docker-compose >/dev/null 2>&1 && [ ! -e /usr/lib/docker/cli-plugins/docker-compose ]; then
-        ln -sf "$(command -v docker-compose)" /usr/lib/docker/cli-plugins/docker-compose
+    mkdir -p /usr/lib/docker/cli-plugins /usr/libexec/docker/cli-plugins
+    if command -v docker-compose >/dev/null 2>&1; then
+        local DC_PATH
+        DC_PATH=$(command -v docker-compose)
+        [ ! -e /usr/lib/docker/cli-plugins/docker-compose ] && ln -sf "${DC_PATH}" /usr/lib/docker/cli-plugins/docker-compose
+        [ ! -e /usr/libexec/docker/cli-plugins/docker-compose ] && ln -sf "${DC_PATH}" /usr/libexec/docker/cli-plugins/docker-compose
     fi
 
     # Установка системного враппера dc в /usr/local/bin/dc
@@ -535,7 +615,9 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
 elif command -v docker-compose >/dev/null 2>&1; then
     exec docker-compose "$@"
 elif [ -x /usr/lib/docker/cli-plugins/docker-compose ]; then
-    exec docker compose "$@"
+    exec /usr/lib/docker/cli-plugins/docker-compose "$@"
+elif [ -x /usr/libexec/docker/cli-plugins/docker-compose ]; then
+    exec /usr/libexec/docker/cli-plugins/docker-compose "$@"
 else
     exec docker compose "$@"
 fi
@@ -565,6 +647,7 @@ EOF_ZRAM_CONF
 
             if systemctl list-unit-files 2>/dev/null | grep -q "systemd-zram-setup"; then
                 systemctl daemon-reload >/dev/null 2>&1 || true
+                systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || \
                 systemctl start dev-zram0.swap 2>/dev/null || systemctl start /dev/zram0 2>/dev/null || true
             fi
         elif [ "${INIT_SYSTEM}" = "openrc" ]; then
@@ -623,7 +706,7 @@ EOF_ZRAM_RC
     if [ "${TOTAL_SWAP_MB:-0}" -lt 1024 ] && [ "${TOTAL_RAM_MB}" -le 3072 ]; then
         local AVAIL_DISK_MB
         AVAIL_DISK_MB=$(df -m / 2>/dev/null | awk 'NR==2{print $4}' || echo "0")
-        if [ ! -f /swapfile ] && [ "${AVAIL_DISK_MB}" -ge 3000 ]; then
+        if [ ! -s /swapfile ] && [ "${AVAIL_DISK_MB}" -ge 3000 ]; then
             log_info "Создание дополнительного файла подкачки (1.5 ГБ Swapfile) для защиты от OOM..."
             local ROOT_FSTYPE
             ROOT_FSTYPE=$(findmnt -n -o FSTYPE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2{print $1}' || echo "ext4")
@@ -654,7 +737,7 @@ EOF_ZRAM_RC
 }
 
 detect_network() {
-    print_step_header "02/10" "ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ СЕТЕВОГО ОКРУЖЕНИЯ"
+    print_step_header "02/11" "ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ СЕТЕВОГО ОКРУЖЕНИЯ"
 
     # Исключение виртуальных, VPN и контейнерных интерфейсов
     PHYS_IFACE=$( (ip -o -4 route show default 2>/dev/null | awk '{print $5}' | grep -vE '^(Meta|tun|tap|docker|br-|veth|wg|tailscale|zt|dummy|bond|lo)' | head -n1) || true )
@@ -697,7 +780,7 @@ detect_network() {
     USER_UID=$(id -u "${TARGET_USER}")
     USER_GID=$(id -g "${TARGET_USER}")
 
-    # БЕЗОПАСНОСТЬ: Добавляем пользователя в группу docker без небезопасных прав 666 на сокет
+    # БЕЗОПАСНОСТЬ: Добавляем пользователя в группу docker с правами 660 на сокет
     getent group docker >/dev/null 2>&1 || grep -q '^docker:' /etc/group 2>/dev/null || groupadd -r docker 2>/dev/null || addgroup -S docker 2>/dev/null || true
     usermod -aG docker "${TARGET_USER}" 2>/dev/null || adduser "${TARGET_USER}" docker 2>/dev/null || addgroup "${TARGET_USER}" docker 2>/dev/null || true
     if [ -S /var/run/docker.sock ]; then
@@ -707,6 +790,7 @@ detect_network() {
 
     log_ok "Сетевые параметры определены:"
     echo -e "      ${CLR_WHITE}• ОС и ядро:        ${PRETTY_NAME:-Linux} ($(uname -r)) [Init: ${INIT_SYSTEM}]${CLR_RESET}"
+    echo -e "      ${CLR_WHITE}• Архитектура:      ${SYSTEM_ARCH} (Аппаратный AES: $([ $HAS_HARDWARE_AES -eq 1 ] && echo "Да" || echo "Нет"))${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• IP сервера:       ${CLR_GREEN}${LOCAL_IP}${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• Шлюз роутера:     ${CLR_CYAN}${ROUTER_GATEWAY}${CLR_RESET}"
     echo -e "      ${CLR_WHITE}• Интерфейс LAN:    ${CLR_YELLOW}${DEFAULT_IFACE}${CLR_RESET}"
@@ -715,8 +799,31 @@ detect_network() {
 }
 
 # =============================================================================
-# 3. ВЫБОР ДИСКОВ И ХРАНИЛИЩА
+# 3. ВЫБОР ДИСКОВ И ХРАНИЛИЩА (С ГЛУБОКИМ АНАЛИЗОМ ДЕРЕВА LSBLK)
 # =============================================================================
+get_disk_parent() {
+    local dev="$1"
+    python3 -c "
+import sys, os, subprocess, re
+dev = os.path.realpath(sys.argv[1])
+try:
+    res = subprocess.check_output(['lsblk', '-slno', 'NAME,TYPE', dev], stderr=subprocess.DEVNULL).decode().strip()
+    if res:
+        for line in reversed(res.splitlines()):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == 'disk':
+                print(parts[0])
+                sys.exit(0)
+except Exception:
+    pass
+name = os.path.basename(dev)
+if 'nvme' in name or 'mmcblk' in name:
+    print(re.sub(r'p\d+$', '', name))
+else:
+    print(re.sub(r'\d+$', '', name))
+" "${dev}" 2>/dev/null || basename "${dev}"
+}
+
 release_device() {
     local dev="$1"
     [ -z "$dev" ] && return 0
@@ -752,8 +859,11 @@ release_device() {
     blockdev --flushbufs "${real_dev}" 2>/dev/null || true
     udevadm settle 2>/dev/null || sleep 1
 
-    # 5. Очистка старых файловых сигнатур (wipefs)
+    # 5. Очистка сигнатур разделов, затем диска (wipefs)
     log_info "Очистка сигнатур разметки (wipefs)..."
+    for part in $(lsblk -lno PATH "${real_dev}" 2>/dev/null | tail -n +2); do
+        wipefs -af "${part}" 2>/dev/null || true
+    done
     if ! wipefs -af "${real_dev}" 2>/dev/null; then
         dd if=/dev/zero of="${real_dev}" bs=1M count=16 oflag=direct status=none 2>/dev/null || \
         dd if=/dev/zero of="${real_dev}" bs=1M count=16 status=none 2>/dev/null || true
@@ -767,20 +877,15 @@ assert_safe_device() {
     local target_dev="$1"
     local real_target
     real_target=$(readlink -f "${target_dev}" 2>/dev/null || echo "${target_dev}")
-    local target_name
-    target_name=$(basename "${real_target}")
     local target_disk
-    target_disk=$(lsblk -lno PKNAME "${real_target}" 2>/dev/null | head -n1 || true)
-    [ -z "${target_disk}" ] && target_disk=$(echo "${target_name}" | sed -E 's/p?[0-9]+$//')
-    [ -z "${target_disk}" ] && target_disk="${target_name}"
+    target_disk=$(get_disk_parent "${real_target}")
 
-    # 1. Поиск диска с корневой файловой системой (/)
+    # 1. Поиск физических дисков корневой файловой системы (/)
     local root_src
     root_src=$(findmnt -n -o SOURCE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2 {print $1}')
     root_src="${root_src%%[*}"
     local root_disk
-    root_disk=$(lsblk -lno PKNAME "${root_src}" 2>/dev/null | head -n1 || true)
-    [ -z "${root_disk}" ] && root_disk=$(basename "${root_src}" | sed -E 's/p?[0-9]+$//')
+    root_disk=$(get_disk_parent "${root_src}")
 
     if [ -n "${root_disk}" ] && [ "${target_disk}" = "${root_disk}" ]; then
         echo ""
@@ -822,13 +927,12 @@ select_disk_device() {
     ROOT_SRC=$(findmnt -n -o SOURCE / 2>/dev/null || df -P / 2>/dev/null | awk 'NR==2 {print $1}')
     ROOT_SRC="${ROOT_SRC%%[*}"
     local ROOT_DISK
-    ROOT_DISK=$(lsblk -lno PKNAME "${ROOT_SRC}" 2>/dev/null | head -n1 || true)
-    [ -z "${ROOT_DISK}" ] && ROOT_DISK=$(basename "${ROOT_SRC}" | sed -E 's/p?[0-9]+$//')
+    ROOT_DISK=$(get_disk_parent "${ROOT_SRC}")
 
     local SYSTEM_DISKS=()
     [ -n "${ROOT_DISK}" ] && SYSTEM_DISKS+=("${ROOT_DISK}")
 
-    # Защита системных разделов, включая /home
+    # Защита системных разделов, включая /boot, /efi, /usr, /var, /home
     for smpt in /boot /boot/efi /efi /usr /var /home; do
         if [ -d "$smpt" ]; then
             local s_src
@@ -836,8 +940,7 @@ select_disk_device() {
             s_src="${s_src%%[*}"
             if [ -n "$s_src" ]; then
                 local s_disk
-                s_disk=$(lsblk -lno PKNAME "$s_src" 2>/dev/null | head -n1 || true)
-                [ -z "$s_disk" ] && s_disk=$(basename "$s_src" | sed -E 's/p?[0-9]+$//')
+                s_disk=$(get_disk_parent "$s_src")
                 [ -n "$s_disk" ] && SYSTEM_DISKS+=("${s_disk}")
             fi
         fi
@@ -846,13 +949,12 @@ select_disk_device() {
     while read -r sw_dev rest; do
         [ -z "$sw_dev" ] || [ "$sw_dev" = "Filename" ] && continue
         local sw_disk
-        sw_disk=$(lsblk -lno PKNAME "$sw_dev" 2>/dev/null | head -n1 || true)
-        [ -z "$sw_disk" ] && sw_disk=$(basename "$sw_dev" | sed -E 's/p?[0-9]+$//')
+        sw_disk=$(get_disk_parent "$sw_dev")
         [ -n "$sw_disk" ] && SYSTEM_DISKS+=("${sw_disk}")
     done < /proc/swaps 2>/dev/null || true
 
     AVAIL_DEVS=()
-    while read -r d_name d_size d_type; do
+    while read -r d_name d_type; do
         [ "$d_type" != "disk" ] && continue
         [ -z "$d_name" ] && continue
         [[ "$d_name" =~ ^(loop|zram|ram) ]] && continue
@@ -869,7 +971,7 @@ select_disk_device() {
         [ "$is_system" -eq 1 ] && continue
 
         AVAIL_DEVS+=("/dev/${d_name}")
-    done < <(lsblk -lno NAME,SIZE,TYPE 2>/dev/null || true)
+    done < <(lsblk -dno NAME,TYPE 2>/dev/null || true)
 
     if [ ${#AVAIL_DEVS[@]} -eq 0 ]; then
         echo ""
@@ -885,7 +987,11 @@ select_disk_device() {
         local DEV_NAME="${AVAIL_DEVS[$i]}"
         local DEV_INFO
         DEV_INFO=$(lsblk -dno SIZE,MODEL,TRAN "${DEV_NAME}" 2>/dev/null | xargs)
-        printf "    ${CLR_WHITE}%d)${CLR_RESET} %-20s ${CLR_YELLOW}[%s]${CLR_RESET}\n" "$((i+1))" "${DEV_NAME}" "${DEV_INFO:-Без метки}"
+        local ROTATIONAL
+        ROTATIONAL=$(cat "/sys/block/$(basename "$DEV_NAME")/queue/rotational" 2>/dev/null || echo "1")
+        local MEDIA_TYPE="HDD"
+        [ "$ROTATIONAL" = "0" ] && MEDIA_TYPE="SSD/NVMe"
+        printf "    ${CLR_WHITE}%d)${CLR_RESET} %-18s ${CLR_YELLOW}[%s | %s]${CLR_RESET}\n" "$((i+1))" "${DEV_NAME}" "${MEDIA_TYPE}" "${DEV_INFO:-Без метки}"
     done
     echo ""
 
@@ -903,7 +1009,7 @@ select_disk_device() {
 # 4. ДИАЛОГ КОНФИГУРАЦИИ
 # =============================================================================
 prompt_configuration() {
-    print_step_header "03/10" "КОНФИГУРАЦИЯ И ВЫБОР РЕЖИМА УСТАНОВКИ"
+    print_step_header "03/11" "КОНФИГУРАЦИЯ И ВЫБОР РЕЖИМА УСТАНОВКИ"
 
     echo -e "  ${CLR_WHITE}Выберите вариант развертывания:${CLR_RESET}"
     echo -e "    ${CLR_GREEN}1) Экспресс-установка${CLR_RESET} (Всё включено, авто-настройка, *.lan) ${CLR_DIM}[Enter]${CLR_RESET}"
@@ -981,8 +1087,15 @@ prompt_configuration() {
         USER_HOME=$(eval echo ~"${TARGET_USER}" 2>/dev/null || echo "/home/${TARGET_USER}")
         rm -f "${USER_HOME}/diagnostic_report.log" 2>/dev/null || true
 
+        log_info "Очистка правил межсетевого экрана (iptables)..."
+        if [ -n "${DEFAULT_IFACE:-}" ]; then
+            iptables -D INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 8083 -j DROP 2>/dev/null || true
+            iptables -D INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 9090 -j DROP 2>/dev/null || true
+            iptables -t nat -D POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || true
+        fi
+
         log_info "Восстановление стандартных записей в /etc/hosts..."
-        sed -i '/\.lan$/d' /etc/hosts 2>/dev/null || true
+        sed -i '/\.lan$/d; /\.duckdns\.org$/d' /etc/hosts 2>/dev/null || true
 
         echo ""
         log_ok "Сброс стека успешно завершен! Все компоненты очищены."
@@ -1027,6 +1140,7 @@ prompt_configuration() {
         ADMIN_USER=$(echo "${ADMIN_USER}" | tr -cd "[:alnum:]_-")
         [ -z "${ADMIN_USER}" ] && ADMIN_USER="admin"
         ADMIN_USER_SAFE=$(echo "${ADMIN_USER}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+        [[ "${ADMIN_USER_SAFE}" =~ ^[0-9] ]] && ADMIN_USER_SAFE="u_${ADMIN_USER_SAFE}"
 
         GEN_PASS=$(python3 -c "import secrets; print(secrets.token_urlsafe(12))" 2>/dev/null || echo "SecurePass$(date +%s)")
         if [ -n "${SAVED_MASTER_PASS:-}" ]; then
@@ -1062,17 +1176,26 @@ prompt_configuration() {
         read -rp "  [?] Выберите вариант [1-5] [${DEF_STORAGE_MODE}]: " STORAGE_MODE || true
         STORAGE_MODE=${STORAGE_MODE:-${DEF_STORAGE_MODE}}
 
+        local SYSTEMD_TIMEOUT="x-systemd.device-timeout=15s,"
+        [ "${INIT_SYSTEM}" = "openrc" ] && SYSTEMD_TIMEOUT=""
+
         if [ "$STORAGE_MODE" = "2" ]; then
             select_disk_device
             DEV_UUID=$(blkid -s UUID -o value "${CHOSEN_DEV}" || true)
             DEV_FSTYPE=$(blkid -s TYPE -o value "${CHOSEN_DEV}" || true)
 
             mkdir -p "${MOUNT_ROOT}"
-            MOUNT_OPTS="defaults,noatime,nofail,x-systemd.device-timeout=15s"
+            MOUNT_OPTS="defaults,noatime,nofail,${SYSTEMD_TIMEOUT}"
+            MOUNT_OPTS="${MOUNT_OPTS%,}"
             if [[ "$DEV_FSTYPE" =~ ^(exfat|ntfs|vfat)$ ]]; then
                 MOUNT_OPTS="${MOUNT_OPTS},uid=${USER_UID},gid=${USER_GID},umask=000,iocharset=utf8"
             elif [ "$DEV_FSTYPE" = "btrfs" ]; then
-                MOUNT_OPTS="${MOUNT_OPTS},compress=zstd,discard=async"
+                local ROT=$(cat "/sys/block/$(basename "$CHOSEN_DEV")/queue/rotational" 2>/dev/null || echo "1")
+                if [ "$ROT" = "0" ]; then
+                    MOUNT_OPTS="${MOUNT_OPTS},compress=zstd,discard=async"
+                else
+                    MOUNT_OPTS="${MOUNT_OPTS},compress=zstd,autodefrag"
+                fi
             fi
 
             mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${CHOSEN_DEV}" "${MOUNT_ROOT}"
@@ -1082,7 +1205,7 @@ prompt_configuration() {
                 echo "UUID=${DEV_UUID} ${MOUNT_ROOT} ${DEV_FSTYPE:-auto} ${MOUNT_OPTS} 0 0" >> /etc/fstab
             fi
 
-            STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
+            [ "${INIT_SYSTEM}" = "systemd" ] && STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
             DEF_SUBDIR="${SAVED_SUBDIR_NAME:-save}"
             read -rp "  [?] Имя подкаталога для данных [${DEF_SUBDIR}]: " SUBDIR_NAME || true
             SUBDIR_NAME=${SUBDIR_NAME:-${DEF_SUBDIR}}
@@ -1105,7 +1228,11 @@ prompt_configuration() {
             DEV_UUID=$(blkid -s UUID -o value "${CHOSEN_DEV}")
 
             mkdir -p "${MOUNT_ROOT}"
-            MOUNT_OPTS="defaults,noatime,compress=zstd,discard=async,nofail,x-systemd.device-timeout=15s"
+            local ROT=$(cat "/sys/block/$(basename "$CHOSEN_DEV")/queue/rotational" 2>/dev/null || echo "1")
+            local BTRFS_DISCARD="discard=async"
+            [ "$ROT" = "1" ] && BTRFS_DISCARD="autodefrag"
+            MOUNT_OPTS="defaults,noatime,compress=zstd,${BTRFS_DISCARD},nofail,${SYSTEMD_TIMEOUT}"
+            MOUNT_OPTS="${MOUNT_OPTS%,}"
             mount -o "${MOUNT_OPTS}" "${CHOSEN_DEV}" "${MOUNT_ROOT}"
             chown -R "${USER_UID}:${USER_GID}" "${MOUNT_ROOT}"
 
@@ -1113,7 +1240,7 @@ prompt_configuration() {
                 echo "UUID=${DEV_UUID} ${MOUNT_ROOT} btrfs ${MOUNT_OPTS} 0 0" >> /etc/fstab
             fi
 
-            STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
+            [ "${INIT_SYSTEM}" = "systemd" ] && STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
             DEF_SUBDIR="${SAVED_SUBDIR_NAME:-save}"
             read -rp "  [?] Имя подкаталога для данных [${DEF_SUBDIR}]: " SUBDIR_NAME || true
             SUBDIR_NAME=${SUBDIR_NAME:-${DEF_SUBDIR}}
@@ -1135,8 +1262,15 @@ prompt_configuration() {
                 assert_safe_device "${CHOSEN_DEV}"
                 release_device "${CHOSEN_DEV}"
 
+                local CIPHER_OPT=""
+                if [ "${HAS_HARDWARE_AES}" -eq 0 ] && [[ "${SYSTEM_ARCH}" =~ ^(arm|aarch64) ]]; then
+                    log_info "Аппаратный AES отсутствует на ${SYSTEM_ARCH}. Использование высокоскоростного ChaCha20-Poly1305."
+                    CIPHER_OPT="--cipher chacha20-poly1305"
+                fi
+
                 log_info "Создание крипто-тома LUKS2 (задайте пароль диска):"
-                cryptsetup luksFormat --type luks2 --pbkdf argon2id "${CHOSEN_DEV}"
+                # shellcheck disable=SC2086
+                cryptsetup luksFormat --type luks2 --pbkdf argon2id ${CIPHER_OPT} "${CHOSEN_DEV}"
 
                 log_info "Открытие тома..."
                 cryptsetup open "${CHOSEN_DEV}" "${LUKS_MAP_NAME}"
@@ -1155,8 +1289,12 @@ prompt_configuration() {
             MAPPER_DEV="/dev/mapper/${LUKS_MAP_NAME}"
             DEV_FSTYPE=$(blkid -s TYPE -o value "${MAPPER_DEV}" || echo "btrfs")
 
-            MOUNT_OPTS="defaults,noatime,nofail,x-systemd.device-timeout=15s"
-            [ "$DEV_FSTYPE" = "btrfs" ] && MOUNT_OPTS="${MOUNT_OPTS},compress=zstd,discard=async"
+            local ROT=$(cat "/sys/block/$(basename "$CHOSEN_DEV")/queue/rotational" 2>/dev/null || echo "1")
+            local BTRFS_DISCARD="discard=async"
+            [ "$ROT" = "1" ] && BTRFS_DISCARD="autodefrag"
+            MOUNT_OPTS="defaults,noatime,nofail,${SYSTEMD_TIMEOUT}"
+            MOUNT_OPTS="${MOUNT_OPTS%,}"
+            [ "$DEV_FSTYPE" = "btrfs" ] && MOUNT_OPTS="${MOUNT_OPTS},compress=zstd,${BTRFS_DISCARD}"
 
             mkdir -p "${MOUNT_ROOT}"
             mountpoint -q "${MOUNT_ROOT}" || mount -o "${MOUNT_OPTS}" "${MAPPER_DEV}" "${MOUNT_ROOT}"
@@ -1226,7 +1364,7 @@ EOF_CRYPT_RC
                 rc-update add homelab-storage boot >/dev/null 2>&1 || rc-update add homelab-storage default >/dev/null 2>&1 || true
             fi
 
-            STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
+            [ "${INIT_SYSTEM}" = "systemd" ] && STORAGE_DEP_LINE="RequiresMountsFor=${MOUNT_ROOT}"
             log_ok "Авторазблокировка успешно настроена!"
 
             cat << EOF_UNLOCK > /usr/local/bin/homelab-unlock
@@ -1304,6 +1442,10 @@ EOF_UNLOCK
             TORRENT_DOMAIN="torrent.${BASE_DOMAIN}"
             METUBE_DOMAIN="metube.${BASE_DOMAIN}"
             PROXY_DOMAIN="proxy.${BASE_DOMAIN}"
+
+            # Автоматическая синхронизация DuckDNS A-записи с локальным IP шлюза
+            log_info "Синхронизация DuckDNS DNS-записи (${BASE_DOMAIN} -> ${LOCAL_IP})..."
+            curl -fsSL -m 10 "https://www.duckdns.org/update?domains=${DUCKDNS_NAME}&token=${DUCKDNS_TOKEN}&ip=${LOCAL_IP}" >/dev/null 2>&1 || true
         else
             SSL_MODE="1"
             DUCKDNS_NAME=""
@@ -1337,6 +1479,7 @@ EOF_UNLOCK
         ADMIN_USER=$(echo "${ADMIN_USER}" | tr -cd "[:alnum:]_-")
         [ -z "${ADMIN_USER}" ] && ADMIN_USER="admin"
         ADMIN_USER_SAFE=$(echo "${ADMIN_USER}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+        [[ "${ADMIN_USER_SAFE}" =~ ^[0-9] ]] && ADMIN_USER_SAFE="u_${ADMIN_USER_SAFE}"
 
         GEN_PASS=$(python3 -c "import secrets; print(secrets.token_urlsafe(12))" 2>/dev/null || echo "SecurePass$(date +%s)")
         if [ -n "${SAVED_MASTER_PASS:-}" ]; then
@@ -1407,6 +1550,13 @@ EOF_UNLOCK
         printf "SAVED_GITEA_DATA_DIR=%q\n" "${GITEA_DATA_DIR}"
         printf "SAVED_ADGUARD_WORK_DIR=%q\n" "${ADGUARD_WORK_DIR}"
         printf "SAVED_INIT_SYSTEM=%q\n" "${INIT_SYSTEM}"
+        printf "SAVED_SELECTED_DOH_1=%q\n" "${SELECTED_DOH_1}"
+        printf "SAVED_SELECTED_DOH_2=%q\n" "${SELECTED_DOH_2}"
+        printf "SAVED_SELECTED_DOH_3=%q\n" "${SELECTED_DOH_3}"
+        printf "SAVED_SELECTED_DOT_1=%q\n" "${SELECTED_DOT_1}"
+        printf "SAVED_SELECTED_DOT_2=%q\n" "${SELECTED_DOT_2}"
+        printf "SAVED_SELECTED_BOOTSTRAP_IPS=%q\n" "${SELECTED_BOOTSTRAP_IPS}"
+        printf "SAVED_SELECTED_BOOTSTRAP_IP_1=%q\n" "${SELECTED_BOOTSTRAP_IP_1}"
     } > "${ENV_FILE}"
     chmod 600 "${ENV_FILE}"
     chown root:root "${ENV_FILE}" 2>/dev/null || true
@@ -1417,12 +1567,19 @@ EOF_UNLOCK
 # 5. ХЭШИРОВАНИЕ И СЕТЕВОЙ СТЕК
 # =============================================================================
 setup_credentials() {
-    print_step_header "04/10" "ГЕНЕРАЦИЯ КРИПТОГРАФИЧЕСКИХ ХЭШЕЙ"
+    print_step_header "04/11" "ГЕНЕРАЦИЯ КРИПТОГРАФИЧЕСКИХ ХЭШЕЙ"
 
     modprobe tun 2>/dev/null || true
     mkdir -p /etc/modules-load.d
     echo "tun" > /etc/modules-load.d/tun.conf
     grep -q '^tun$' /etc/modules 2>/dev/null || echo "tun" >> /etc/modules 2>/dev/null || true
+
+    # Гарантия создания файла узла /dev/net/tun
+    mkdir -p /dev/net
+    if [ ! -c /dev/net/tun ]; then
+        mknod /dev/net/tun c 10 200 2>/dev/null || true
+        chmod 666 /dev/net/tun 2>/dev/null || true
+    fi
 
     log_info "Хэширование пароля AdGuard Home (Bcrypt)..."
     AGH_HASH=""
@@ -1472,12 +1629,12 @@ sys.exit(1)
         SALT_VAL=$(python3 -c "import secrets; print(secrets.token_urlsafe(16))" 2>/dev/null || echo "homelabdefaults123")
         
         if command -v argon2 >/dev/null 2>&1; then
-            VAULT_ADMIN_HASH=$(printf '%s' "${VAULT_ADMIN_TOKEN}" | argon2 "${SALT_VAL}" -e -id -k 65540 -t 3 -p 4 2>/dev/null || true)
+            VAULT_ADMIN_HASH=$(printf '%s' "${VAULT_ADMIN_TOKEN}" | argon2 "${SALT_VAL}" -e -id -k 65540 -t 3 -p 4 2>/dev/null | grep -E '^\$argon2id' || true)
         fi
 
         # Fallback через контейнер Vaultwarden (гарантия стандарта Argon2id 2026)
         if [ -z "${VAULT_ADMIN_HASH:-}" ] && command -v docker >/dev/null 2>&1; then
-            VAULT_ADMIN_HASH=$(echo "${VAULT_ADMIN_TOKEN}" | docker run -i --rm vaultwarden/server:alpine /vaultwarden hash 2>/dev/null | tr -d '\r\n' || true)
+            VAULT_ADMIN_HASH=$(printf '%s\n%s\n' "${VAULT_ADMIN_TOKEN}" "${VAULT_ADMIN_TOKEN}" | docker run -i --rm vaultwarden/server:alpine /vaultwarden hash --preset owasp 2>/dev/null | grep -E '^\$argon2id' | tr -d '\r\n' || true)
         fi
 
         if [ -z "${VAULT_ADMIN_HASH:-}" ]; then
@@ -1489,7 +1646,7 @@ sys.exit(1)
 }
 
 setup_gateway_networking() {
-    print_step_header "05/10" "МАРШРУТИЗАЦИЯ, IPTABLES И ЗАЩИТА ОТ ПЕТЕЛЬ"
+    print_step_header "05/11" "МАРШРУТИЗАЦИЯ, IPTABLES И ЗАЩИТА ОТ ПЕТЕЛЬ"
 
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
         log_info "Освобождение порта 53 (отключение DNSStubListener при наличии)..."
@@ -1551,12 +1708,14 @@ EOF_SYSCTL
         if [ -n "${DEFAULT_IFACE}" ]; then
             iptables -t nat -C POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || \
             iptables -t nat -A POSTROUTING -o "${DEFAULT_IFACE}" -j MASQUERADE 2>/dev/null || true
-            # Блокировка прямого незашифрованного доступа к AdGuard 8083 из LAN (доступ строго через Caddy)
+            # Блокировка прямого незашифрованного доступа к AdGuard 8083 и Mihomo 9090 из LAN (доступ строго через Caddy HTTPS)
             iptables -C INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 8083 -j DROP 2>/dev/null || \
             iptables -A INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 8083 -j DROP 2>/dev/null || true
+            iptables -C INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 9090 -j DROP 2>/dev/null || \
+            iptables -A INPUT -i "${DEFAULT_IFACE}" -p tcp --dport 9090 -j DROP 2>/dev/null || true
         fi
 
-        log_info "Установка сторожевого таймера защиты от петель маршрутизации..."
+        log_info "Установка интеллектуального сторожевого таймера защиты от петель маршрутизации..."
         cat << 'EOF_WATCHDOG' > /usr/local/bin/gateway-watchdog.sh
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1571,7 +1730,22 @@ IFACE="${SAVED_PHYS_IFACE:-${PHYS_IFACE:-}}"
 SERVER_IP=$(ip -o -4 addr show dev "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
 ROUTER_IP="${SAVED_ROUTER_GATEWAY:-}"
 
-if [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ] || [[ ! "$ROUTER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+# Интеллектуальная проверка: находится ли ROUTER_IP в той же подсети, что и текущий SERVER_IP
+IS_SAME_SUBNET=$(python3 -c "
+import ipaddress, sys
+s_ip = '${SERVER_IP}'
+r_ip = '${ROUTER_IP}'
+try:
+    if s_ip and r_ip:
+        s_net = ipaddress.ip_network(f'{s_ip}/24', strict=False)
+        print('1' if ipaddress.ip_address(r_ip) in s_net else '0')
+    else:
+        print('0')
+except Exception:
+    print('0')
+" 2>/dev/null || echo "0")
+
+if [ "$IS_SAME_SUBNET" != "1" ] || [ -z "$ROUTER_IP" ] || [ "$ROUTER_IP" = "$SERVER_IP" ]; then
     ROUTER_IP=$(ip route show default dev "$IFACE" 2>/dev/null | awk '/via/ {for(j=1;j<=NF;j++) if($j=="via") {print $(j+1); exit}}' | head -n1 || true)
 fi
 
@@ -1591,15 +1765,26 @@ if [ -n "$ROUTER_IP" ] && [ "$ROUTER_IP" != "$SERVER_IP" ] && [[ "$ROUTER_IP" =~
     fi
 fi
 
+# Восстановление /etc/resolv.conf если система случайно сбросила его на нерабочий 127.0.0.53
+if [ -f /etc/resolv.conf ] && grep -q '127.0.0.53' /etc/resolv.conf 2>/dev/null; then
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    cat << 'EOF_RESOLV_FIX' > /etc/resolv.conf
+nameserver 127.0.0.1
+nameserver 77.88.8.8
+nameserver 1.1.1.1
+EOF_RESOLV_FIX
+fi
+
 sysctl -w net.ipv4.ip_forward=1 net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true
 iptables -P FORWARD ACCEPT 2>/dev/null || true
 if [ -n "$IFACE" ]; then
     iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
-    # Поддержание постоянной защиты порта 8083 AdGuard от прямого доступа из LAN
     iptables -C INPUT -i "$IFACE" -p tcp --dport 8083 -j DROP 2>/dev/null || \
     iptables -A INPUT -i "$IFACE" -p tcp --dport 8083 -j DROP 2>/dev/null || true
+    iptables -C INPUT -i "$IFACE" -p tcp --dport 9090 -j DROP 2>/dev/null || \
+    iptables -A INPUT -i "$IFACE" -p tcp --dport 9090 -j DROP 2>/dev/null || true
 fi
 EOF_WATCHDOG
         chmod 750 /usr/local/bin/gateway-watchdog.sh
@@ -1621,7 +1806,8 @@ Description=Run Gateway Loop Watchdog periodically
 
 [Timer]
 OnBootSec=15s
-OnUnitActiveSec=60s
+OnUnitInactiveSec=60s
+OnCalendar=*:*
 AccuracySec=5s
 
 [Install]
@@ -1660,7 +1846,7 @@ EOF_WD_TMR
 # 6. СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW
 # =============================================================================
 setup_directories() {
-    print_step_header "06/10" "СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW"
+    print_step_header "06/11" "СТРУКТУРА КАТАЛОГОВ И BTRFS NO-COW"
 
     mkdir -p "${APP_DIR}/caddy/data" "${APP_DIR}/caddy/config"
     mkdir -p "${SAVE_DIR}/certificates" "${SAVE_DIR}/backups/vaultwarden" "${SAVE_DIR}/backups/gitea"
@@ -1671,7 +1857,6 @@ setup_directories() {
         local target_dir="$1"
         mkdir -p "${target_dir}"
         chattr +C "${target_dir}" 2>/dev/null || true
-        # На файловой системе Btrfs атрибут +C применяется только к новым файлам, обрабатываем существующие
         find "${target_dir}" -maxdepth 2 -type f -exec chattr +C {} + 2>/dev/null || true
     }
 
@@ -1683,8 +1868,9 @@ setup_directories() {
 
     # Подготовка каталогов для MeTube с No-COW на пути сохранения
     if [[ "${ENABLE_METUBE}" =~ ^[Yy]$ ]]; then
-        mkdir -p "${SAVE_DIR}/metube"
+        mkdir -p "${SAVE_DIR}/metube" "${SAVE_DIR}/metube/tmp" "${SAVE_DIR}/metube/.metube"
         apply_nocow_helper "${SAVE_DIR}/metube"
+        apply_nocow_helper "${SAVE_DIR}/metube/tmp"
         chown -R "${USER_UID}:${USER_GID}" "${SAVE_DIR}/metube" 2>/dev/null || true
     fi
 
@@ -1755,7 +1941,6 @@ if os.path.isfile(zip_p) and os.path.getsize(zip_p) > 50000:
         chown -R "${USER_UID}:${USER_GID}" "${APP_DIR}/qbittorrent" 2>/dev/null || true
         log_info "Генерация конфигурации qBittorrent с мастер-паролем..."
         
-        # Безопасное вычисление хэша пароля без строковой инъекции
         local QBIT_HASH
         QBIT_HASH=$(python3 -c "
 import sys, hashlib, os, base64
@@ -1777,7 +1962,7 @@ Cookies=@Invalid()
 
 [Preferences]
 Connection\PortRangeMin=6881
-Downloads\DiskWriteCacheSize=32
+Downloads\DiskWriteCacheSize=64
 Downloads\SavePath=/downloads/
 Downloads\ScanDirsV2=@Invalid()
 Downloads\TempPath=/downloads/temp/
@@ -1814,6 +1999,19 @@ EOF_QBIT_CONF
         mkdir -p "${APP_DIR}/mihomo/ui" "${APP_DIR}/mihomo/providers"
         [ ! -f "${APP_DIR}/mihomo/providers/proxies.yaml" ] && echo "proxies: []" > "${APP_DIR}/mihomo/providers/proxies.yaml"
 
+        # Предварительная загрузка и проверка подписки (если указана)
+        if [ -n "${SUB_URL}" ] && [ "${SUB_URL}" != "none" ]; then
+            log_info "Проверка и кэширование подписки прокси..."
+            curl -fsSL --connect-timeout 8 -m 20 "${SUB_URL}" -o "${APP_DIR}/mihomo/providers/proxies.yaml.tmp" 2>/dev/null || true
+            if [ -s "${APP_DIR}/mihomo/providers/proxies.yaml.tmp" ]; then
+                mv -f "${APP_DIR}/mihomo/providers/proxies.yaml.tmp" "${APP_DIR}/mihomo/providers/proxies.yaml"
+                log_ok "Подписка успешно проверена и кэширована"
+            else
+                rm -f "${APP_DIR}/mihomo/providers/proxies.yaml.tmp"
+                log_warn "Подписка временно недоступна или пуста. Будет активирован безопасный режим DIRECT."
+            fi
+        fi
+
         if [ -f "${APP_DIR}/mihomo/ui/index.html" ]; then
             log_ok "Веб-интерфейс MetaCubeXD уже установлен (пропуск загрузки)"
         else
@@ -1838,7 +2036,35 @@ EOF_QBIT_CONF
                 done
                 return 1
             }
-            run_spin "Загрузка веб-интерфейса MetaCubeXD (с зеркалами)" fetch_metacubexd || true
+            if ! run_spin "Загрузка веб-интерфейса MetaCubeXD (с зеркалами)" fetch_metacubexd; then
+                cat << 'EOF_FALLBACK_UI' > "${APP_DIR}/mihomo/ui/index.html"
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mihomo TUN Gateway</title>
+<style>
+body { background: #0f172a; color: #f8fafc; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+.card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 28px; max-width: 520px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+h1 { color: #38bdf8; font-size: 22px; margin-top: 0; }
+p { color: #94a3b8; font-size: 14px; line-height: 1.6; }
+.btn { display: inline-block; background: #0284c7; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 500; margin-top: 12px; }
+.btn:hover { background: #0369a1; }
+.badge { background: #047857; color: #a7f3d0; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="card">
+  <span class="badge">ONLINE</span>
+  <h1>Mihomo TUN Smart Gateway</h1>
+  <p>Ядро маршрутизации успешно запущено и активно. Внешний веб-интерфейс MetaCubeXD может быть открыт через официальный онлайн-клиент или обновлен позже.</p>
+  <a class="btn" href="https://metacubex.github.io/metacubexd/" target="_blank" rel="noopener">Открыть MetaCubeXD Online</a>
+</div>
+</body>
+</html>
+EOF_FALLBACK_UI
+            fi
         fi
 
         # Предотвращение Mixed Content в UI при работе через HTTPS
@@ -1886,13 +2112,351 @@ EOF_QBIT_CONF
 }
 
 # =============================================================================
-# 7. КОНФИГУРАЦИЯ ADGUARD HOME И MIHOMO TUN
+# 7. ТЕСТИРОВАНИЕ И АВТОМАТИЧЕСКИЙ ВЫБОР DOH И DOT РЕЗОЛВЕРОВ
+# =============================================================================
+benchmark_dns_servers() {
+    print_step_header "07/11" "ТЕСТИРОВАНИЕ И ВЫБОР БЫСТРЫХ И БЕЗОПАСНЫХ DOH / DOT РЕЗОЛВЕРОВ"
+
+    if [[ ! "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
+        log_info "Сетевой шлюз отключен в конфигурации. Пропуск тестирования DoH / DoT."
+        return 0
+    fi
+
+    echo -e "  ${CLR_CYAN}Запуск параллельного бенчмарка безопасности и задержки DoH/DoT...${CLR_RESET}"
+    echo -e "  ${CLR_DIM}Проверка подлинности сертификатов TLS, целостности DNSSEC и RTT пинга...${CLR_RESET}"
+    echo ""
+
+    local BENCH_JSON
+    BENCH_JSON=$(python3 - << 'EOF_PY_BENCH'
+import socket, ssl, time, struct, base64, urllib.request, concurrent.futures, json, sys
+
+CANDIDATES = [
+    {
+        "name": "Cloudflare (1.1.1.1)",
+        "doh_url": "https://cloudflare-dns.com/dns-query",
+        "dot_host": "cloudflare-dns.com",
+        "dot_ip": "1.1.1.1",
+        "dot_url": "tls://1.1.1.1",
+        "bootstrap": "1.1.1.1",
+        "policy": "Zero-logs, DNSSEC, Anycast"
+    },
+    {
+        "name": "Quad9 (9.9.9.9)",
+        "doh_url": "https://dns.quad9.net/dns-query",
+        "dot_host": "dns.quad9.net",
+        "dot_ip": "9.9.9.9",
+        "dot_url": "tls://dns.quad9.net",
+        "bootstrap": "9.9.9.9",
+        "policy": "Threat Blocking, Swiss GDPR, DNSSEC"
+    },
+    {
+        "name": "AdGuard DNS",
+        "doh_url": "https://dns.adguard-dns.com/dns-query",
+        "dot_host": "dns.adguard-dns.com",
+        "dot_ip": "94.140.14.14",
+        "dot_url": "tls://dns.adguard-dns.com",
+        "bootstrap": "94.140.14.14",
+        "policy": "Ad/Tracker Filtering, No-logs Anycast"
+    },
+    {
+        "name": "Google Public DNS",
+        "doh_url": "https://dns.google/dns-query",
+        "dot_host": "dns.google",
+        "dot_ip": "8.8.8.8",
+        "dot_url": "tls://dns.google",
+        "bootstrap": "8.8.8.8",
+        "policy": "Global Anycast, High Availability"
+    },
+    {
+        "name": "Yandex DNS",
+        "doh_url": "https://common.dot.dns.yandex.net/dns-query",
+        "dot_host": "common.dot.dns.yandex.net",
+        "dot_ip": "77.88.8.8",
+        "dot_url": "tls://common.dot.dns.yandex.net",
+        "bootstrap": "77.88.8.8",
+        "policy": "Low Latency CIS/Eastern Europe"
+    },
+    {
+        "name": "Mullvad DNS",
+        "doh_url": "https://dns.mullvad.net/dns-query",
+        "dot_host": "dns.mullvad.net",
+        "dot_ip": "194.242.2.2",
+        "dot_url": "tls://dns.mullvad.net",
+        "bootstrap": "194.242.2.2",
+        "policy": "RAM-only, Strict Privacy, No Logs"
+    },
+    {
+        "name": "Control D (Freedns)",
+        "doh_url": "https://freedns.controld.com/p0",
+        "dot_host": "p0.freedns.controld.com",
+        "dot_ip": "76.76.2.0",
+        "dot_url": "tls://p0.freedns.controld.com",
+        "bootstrap": "76.76.2.0",
+        "policy": "Uncensored Anycast, No Logs"
+    }
+]
+
+# Wire DNS Query for example.com (type A, class IN, recursion desired)
+QUERY_WIRE = (
+    b'\xaa\xbb\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+    b'\x07example\x03com\x00'
+    b'\x00\x01\x00\x01'
+)
+
+def recv_exact(s, length):
+    buf = b""
+    while len(buf) < length:
+        chunk = s.recv(length - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+def test_dot(c, timeout=1.8):
+    host = c["dot_host"]
+    ip = c.get("dot_ip") or host
+    t0 = time.perf_counter()
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((ip, 853), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                wire_msg = struct.pack('!H', len(QUERY_WIRE)) + QUERY_WIRE
+                ssock.sendall(wire_msg)
+                len_bytes = recv_exact(ssock, 2)
+                if len(len_bytes) < 2:
+                    return None
+                expected_len = struct.unpack('!H', len_bytes)[0]
+                resp = recv_exact(ssock, expected_len)
+                if len(resp) >= 12 and (resp[3] & 0x0F) == 0:
+                    rtt = round((time.perf_counter() - t0) * 1000, 1)
+                    return {
+                        "name": c["name"],
+                        "proto": "DoT",
+                        "endpoint": c["dot_url"],
+                        "bootstrap": c["bootstrap"],
+                        "policy": c["policy"],
+                        "latency_ms": rtt,
+                        "secure": True
+                    }
+    except Exception:
+        pass
+    return None
+
+def test_doh(c, timeout=1.8):
+    url = c["doh_url"]
+    t0 = time.perf_counter()
+    try:
+        b64 = base64.urlsafe_b64encode(QUERY_WIRE).rstrip(b'=').decode('ascii')
+        get_url = f"{url}?dns={b64}"
+        req = urllib.request.Request(
+            get_url,
+            headers={
+                "Accept": "application/dns-message",
+                "User-Agent": "Homelab-DNS-Bench/2026"
+            }
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            if resp.status == 200:
+                data = resp.read()
+                if len(data) >= 12 and (data[3] & 0x0F) == 0:
+                    rtt = round((time.perf_counter() - t0) * 1000, 1)
+                    return {
+                        "name": c["name"],
+                        "proto": "DoH",
+                        "endpoint": c["doh_url"],
+                        "bootstrap": c["bootstrap"],
+                        "policy": c["policy"],
+                        "latency_ms": rtt,
+                        "secure": True
+                    }
+    except Exception:
+        try:
+            post_req = urllib.request.Request(
+                url,
+                data=QUERY_WIRE,
+                headers={
+                    "Content-Type": "application/dns-message",
+                    "Accept": "application/dns-message",
+                    "User-Agent": "Homelab-DNS-Bench/2026"
+                }
+            )
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(post_req, timeout=timeout, context=ctx) as resp:
+                if resp.status == 200:
+                    data = resp.read()
+                    if len(data) >= 12 and (data[3] & 0x0F) == 0:
+                        rtt = round((time.perf_counter() - t0) * 1000, 1)
+                        return {
+                            "name": c["name"],
+                            "proto": "DoH",
+                            "endpoint": c["doh_url"],
+                            "bootstrap": c["bootstrap"],
+                            "policy": c["policy"],
+                            "latency_ms": rtt,
+                            "secure": True
+                        }
+        except Exception:
+            pass
+    return None
+
+dot_results = []
+doh_results = []
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=14) as executor:
+    fut_dot = {executor.submit(test_dot, c): c for c in CANDIDATES}
+    fut_doh = {executor.submit(test_doh, c): c for c in CANDIDATES}
+    for f in concurrent.futures.as_completed(fut_dot):
+        r = f.result()
+        if r: dot_results.append(r)
+    for f in concurrent.futures.as_completed(fut_doh):
+        r = f.result()
+        if r: doh_results.append(r)
+
+dot_results.sort(key=lambda x: x["latency_ms"])
+doh_results.sort(key=lambda x: x["latency_ms"])
+
+dot_blocked = (len(dot_results) == 0 and len(doh_results) > 0)
+
+default_dot = [
+    {"name": "Yandex DNS", "endpoint": "tls://common.dot.dns.yandex.net", "bootstrap": "77.88.8.8", "latency_ms": 15.0, "secure": True},
+    {"name": "Cloudflare (1.1.1.1)", "endpoint": "tls://1.1.1.1", "bootstrap": "1.1.1.1", "latency_ms": 20.0, "secure": True},
+    {"name": "Quad9 (9.9.9.9)", "endpoint": "tls://dns.quad9.net", "bootstrap": "9.9.9.9", "latency_ms": 28.0, "secure": True}
+]
+default_doh = [
+    {"name": "Cloudflare (1.1.1.1)", "endpoint": "https://cloudflare-dns.com/dns-query", "bootstrap": "1.1.1.1", "latency_ms": 18.0, "secure": True},
+    {"name": "AdGuard DNS", "endpoint": "https://dns.adguard-dns.com/dns-query", "bootstrap": "94.140.14.14", "latency_ms": 24.0, "secure": True},
+    {"name": "Google Public DNS", "endpoint": "https://dns.google/dns-query", "bootstrap": "8.8.8.8", "latency_ms": 26.0, "secure": True}
+]
+
+effective_doh = doh_results if doh_results else default_doh
+if dot_blocked:
+    effective_dot = effective_doh
+else:
+    effective_dot = dot_results if dot_results else default_dot
+
+out = {
+    "dot_results": dot_results,
+    "doh_results": doh_results,
+    "dot_blocked": dot_blocked,
+    "is_offline": (len(doh_results) == 0 and len(dot_results) == 0),
+    "selected_doh_1": effective_doh[0]["endpoint"],
+    "selected_doh_2": effective_doh[1]["endpoint"] if len(effective_doh) > 1 else effective_doh[0]["endpoint"],
+    "selected_doh_3": effective_doh[2]["endpoint"] if len(effective_doh) > 2 else effective_doh[0]["endpoint"],
+    "selected_doh_name_1": effective_doh[0]["name"],
+    "selected_doh_ping_1": effective_doh[0]["latency_ms"],
+    "selected_doh_name_2": effective_doh[1]["name"] if len(effective_doh) > 1 else "",
+    "selected_doh_ping_2": effective_doh[1]["latency_ms"] if len(effective_doh) > 1 else 0,
+    "selected_dot_1": effective_dot[0]["endpoint"],
+    "selected_dot_2": effective_dot[1]["endpoint"] if len(effective_dot) > 1 else effective_dot[0]["endpoint"],
+    "selected_dot_name_1": effective_dot[0]["name"],
+    "selected_dot_ping_1": effective_dot[0]["latency_ms"],
+    "selected_dot_name_2": effective_dot[1]["name"] if len(effective_dot) > 1 else "",
+    "selected_dot_ping_2": effective_dot[1]["latency_ms"] if len(effective_dot) > 1 else 0,
+    "bootstrap_ips": list(dict.fromkeys([
+        "77.88.8.8", "1.1.1.1",
+        effective_doh[0].get("bootstrap", "1.1.1.1"),
+        effective_dot[0].get("bootstrap", "77.88.8.8"),
+        "9.9.9.9", "8.8.8.8"
+    ]))
+}
+print(json.dumps(out))
+EOF_PY_BENCH
+)
+
+    eval "$(python3 - "${BENCH_JSON}" << 'EOF_EXTRACT_BENCH'
+import sys, json, shlex
+d = json.loads(sys.argv[1])
+b_ips = " ".join(d.get("bootstrap_ips", []))
+b_ip_1 = b_ips.split()[0] if b_ips else "77.88.8.8"
+print(f"SELECTED_DOH_1={shlex.quote(str(d.get('selected_doh_1', '')))}")
+print(f"SELECTED_DOH_2={shlex.quote(str(d.get('selected_doh_2', '')))}")
+print(f"SELECTED_DOH_3={shlex.quote(str(d.get('selected_doh_3', '')))}")
+print(f"SELECTED_DOT_1={shlex.quote(str(d.get('selected_dot_1', '')))}")
+print(f"SELECTED_DOT_2={shlex.quote(str(d.get('selected_dot_2', '')))}")
+print(f"SELECTED_BOOTSTRAP_IPS={shlex.quote(b_ips)}")
+print(f"SELECTED_BOOTSTRAP_IP_1={shlex.quote(b_ip_1)}")
+print(f"DOH_NAME_1={shlex.quote(str(d.get('selected_doh_name_1', '')))}")
+print(f"DOH_PING_1={shlex.quote(str(d.get('selected_doh_ping_1', 0)))}")
+print(f"DOH_NAME_2={shlex.quote(str(d.get('selected_doh_name_2', '')))}")
+print(f"DOH_PING_2={shlex.quote(str(d.get('selected_doh_ping_2', 0)))}")
+print(f"DOT_NAME_1={shlex.quote(str(d.get('selected_dot_name_1', '')))}")
+print(f"DOT_PING_1={shlex.quote(str(d.get('selected_dot_ping_1', 0)))}")
+print(f"DOT_NAME_2={shlex.quote(str(d.get('selected_dot_name_2', '')))}")
+print(f"DOT_PING_2={shlex.quote(str(d.get('selected_dot_ping_2', 0)))}")
+print(f"DOT_BLOCKED={'1' if d.get('dot_blocked') else '0'}")
+print(f"IS_OFFLINE={'1' if d.get('is_offline') else '0'}")
+EOF_EXTRACT_BENCH
+)"
+
+    python3 - "${BENCH_JSON}" << 'EOF_PRINT_BENCH'
+import sys, json
+data = json.loads(sys.argv[1])
+doh_list = data.get("doh_results", [])
+dot_list = data.get("dot_results", [])
+
+if doh_list:
+    print('\033[1;36m┌── Результаты тестирования DNS-over-HTTPS (DoH, порт 443) ──────────────────\033[0m')
+    for idx, item in enumerate(doh_list[:5]):
+        badge = '\033[1;32m[ВЫБРАН]\033[0m' if idx < 2 else '\033[2m[РЕЗЕРВ]\033[0m'
+        name_str = item.get("name", "")
+        latency_str = f'{item.get("latency_ms", 0):>5.1f}'
+        policy_str = item.get("policy", "")
+        print(f'│   \033[1;32m✔\033[0m {name_str:<24} {latency_str} мс   {badge}   \033[2m{policy_str}\033[0m')
+    print('\033[1;36m└──\033[0m')
+
+if dot_list:
+    print('\033[1;36m┌── Результаты тестирования DNS-over-TLS (DoT, порт 853) ────────────────────\033[0m')
+    for idx, item in enumerate(dot_list[:5]):
+        badge = '\033[1;32m[ВЫБРАН]\033[0m' if idx < 2 else '\033[2m[РЕЗЕРВ]\033[0m'
+        name_str = item.get("name", "")
+        latency_str = f'{item.get("latency_ms", 0):>5.1f}'
+        policy_str = item.get("policy", "")
+        print(f'│   \033[1;32m✔\033[0m {name_str:<24} {latency_str} мс   {badge}   \033[2m{policy_str}\033[0m')
+    print('\033[1;36m└──\033[0m')
+EOF_PRINT_BENCH
+
+    if [ "${DOT_BLOCKED}" = "1" ]; then
+        log_warn "Порт DoT (853) заблокирован вашим провайдером. Автоматически активирован DoH (порт 443)!"
+    fi
+
+    if [ "${IS_OFFLINE}" = "1" ]; then
+        log_warn "Режим автономной установки или внешний DNS временно недоступен."
+        log_ok "Применены проверенные высоконадежные эталонные DoH/DoT резолверы."
+    fi
+
+    log_ok "Выбраны самые быстрые и безопасные резолверы:"
+    echo -e "      ${CLR_WHITE}• Основной DoH:${CLR_RESET}   ${CLR_GREEN}${DOH_NAME_1}${CLR_RESET} (${DOH_PING_1} мс) -> ${CLR_CYAN}${SELECTED_DOH_1}${CLR_RESET}"
+    [ -n "${DOH_NAME_2}" ] && echo -e "      ${CLR_WHITE}• Резервный DoH:${CLR_RESET}  ${CLR_GREEN}${DOH_NAME_2}${CLR_RESET} (${DOH_PING_2} мс) -> ${CLR_CYAN}${SELECTED_DOH_2}${CLR_RESET}"
+    echo -e "      ${CLR_WHITE}• Основной DoT:${CLR_RESET}   ${CLR_GREEN}${DOT_NAME_1}${CLR_RESET} (${DOT_PING_1} мс) -> ${CLR_CYAN}${SELECTED_DOT_1}${CLR_RESET}"
+    [ -n "${DOT_NAME_2}" ] && echo -e "      ${CLR_WHITE}• Резервный DoT:${CLR_RESET}  ${CLR_GREEN}${DOT_NAME_2}${CLR_RESET} (${DOT_PING_2} мс) -> ${CLR_CYAN}${SELECTED_DOT_2}${CLR_RESET}"
+    echo -e "      ${CLR_WHITE}• Bootstrap IPs:${CLR_RESET} ${SELECTED_BOOTSTRAP_IPS}"
+
+    # Сохранение результатов в .env
+    if [ -f "${ENV_FILE}" ]; then
+        sed -i '/SAVED_SELECTED_DOH_/d; /SAVED_SELECTED_DOT_/d; /SAVED_SELECTED_BOOTSTRAP_IP/d' "${ENV_FILE}" 2>/dev/null || true
+        {
+            printf "SAVED_SELECTED_DOH_1=%q\n" "${SELECTED_DOH_1}"
+            printf "SAVED_SELECTED_DOH_2=%q\n" "${SELECTED_DOH_2}"
+            printf "SAVED_SELECTED_DOH_3=%q\n" "${SELECTED_DOH_3}"
+            printf "SAVED_SELECTED_DOT_1=%q\n" "${SELECTED_DOT_1}"
+            printf "SAVED_SELECTED_DOT_2=%q\n" "${SELECTED_DOT_2}"
+            printf "SAVED_SELECTED_BOOTSTRAP_IPS=%q\n" "${SELECTED_BOOTSTRAP_IPS}"
+            printf "SAVED_SELECTED_BOOTSTRAP_IP_1=%q\n" "${SELECTED_BOOTSTRAP_IP_1}"
+        } >> "${ENV_FILE}"
+    fi
+}
+
+# =============================================================================
+# 8. КОНФИГУРАЦИЯ ADGUARD HOME И MIHOMO TUN
 # =============================================================================
 configure_gateway_services() {
-    print_step_header "07/10" "ГЕНЕРАЦИЯ КОНФИГУРАЦИЙ ADGUARD HOME И MIHOMO TUN"
+    print_step_header "08/11" "ГЕНЕРАЦИЯ КОНФИГУРАЦИЙ ADGUARD HOME И MIHOMO TUN"
 
     if [[ "${ENABLE_GATEWAY}" =~ ^[Yy]$ ]]; then
-        log_info "Формирование DNS-переопределений и фильтров AdGuard Home (Schema 34)..."
+        log_info "Формирование DNS-переопределений и фильтров AdGuard Home (Schema 34+)..."
+        local BOOTSTRAP_YAML_LINES
+        BOOTSTRAP_YAML_LINES=$(for b_ip in ${SELECTED_BOOTSTRAP_IPS:-77.88.8.8 1.1.1.1 9.9.9.9 8.8.8.8}; do echo "    - ${b_ip}"; done)
         local REWRITE_ENTRIES=""
         [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]] && REWRITE_ENTRIES="${REWRITE_ENTRIES}
     - domain: ${VAULT_DOMAIN}
@@ -1934,12 +2498,12 @@ dns:
   upstream_dns:
     - 127.0.0.1:1053
   fallback_dns:
-    - tls://common.dot.dns.yandex.net
-    - tls://1.1.1.1
+    - ${SELECTED_DOT_1:-tls://common.dot.dns.yandex.net}
+    - ${SELECTED_DOT_2:-tls://1.1.1.1}
+    - ${SELECTED_DOH_1:-https://cloudflare-dns.com/dns-query}
   upstream_timeout: 2s
   bootstrap_dns:
-    - 77.88.8.8
-    - 1.1.1.1
+${BOOTSTRAP_YAML_LINES}
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
@@ -1977,7 +2541,6 @@ user_rules:
   - '@@||*.libria.fun^\$important'
 EOF_AGH
 
-        # Экранирование секрета для YAML
         local ESCAPED_MIHOMO_SECRET
         ESCAPED_MIHOMO_SECRET=$(python3 -c "import sys, json; print(json.dumps(sys.stdin.read().rstrip('\r\n')))" <<< "${MIHOMO_SECRET}")
 
@@ -2017,10 +2580,12 @@ dns:
   nameserver:
     - 77.88.8.8
     - 1.1.1.1
+    - ${SELECTED_DOH_1:-https://cloudflare-dns.com/dns-query}
 
 tun:
   enable: true
   stack: mixed
+  mtu: 1400
   auto-route: true
   auto-detect-interface: true
   strict-route: false
@@ -2161,15 +2726,18 @@ dns:
   default-nameserver:
     - 77.88.8.8
     - 1.1.1.1
+    - ${SELECTED_BOOTSTRAP_IP_1:-8.8.8.8}
   proxy-server-nameserver:
     - 77.88.8.8
     - 1.1.1.1
+    - ${SELECTED_BOOTSTRAP_IP_1:-8.8.8.8}
   direct-nameserver:
     - 77.88.8.8
     - 77.88.8.1
   nameserver:
     - 77.88.8.8
-    - https://dns.google/dns-query
+    - ${SELECTED_DOH_1:-https://dns.google/dns-query}
+    - ${SELECTED_DOH_2:-https://cloudflare-dns.com/dns-query}
 
 tcp-concurrent: true
 
@@ -2228,6 +2796,8 @@ proxy-groups:
       - my-sub
   - name: AUTO
     type: url-test
+    proxies:
+      - DIRECT
     use:
       - my-sub
     url: https://www.gstatic.com/generate_204
@@ -2259,6 +2829,13 @@ rules:
   - RULE-SET,github_site,DIRECT
 
   # Google Gemini, AI Studio и LLM (OpenAI, Claude, Anthropic) — строго через PROXY
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,perplexity.ai,PROXY
   - DOMAIN-SUFFIX,gemini.google.com,PROXY
   - DOMAIN-SUFFIX,aistudio.google.com,PROXY
   - DOMAIN-SUFFIX,alkali.google.com,PROXY
@@ -2296,16 +2873,18 @@ EOF_MIHOMO
 }
 
 # =============================================================================
-# 8. CADDYFILE И DOCKER COMPOSE СТЕК
+# 9. CADDYFILE И DOCKER COMPOSE СТЕК
 # =============================================================================
 configure_caddy_and_compose() {
-    print_step_header "08/10" "ГЕНЕРАЦИЯ CADDYFILE И DOCKER-COMPOSE.YML"
-    local SAMBA_PASS_COMPOSE="${SAMBA_PASS//\$/\$\$}"
-
-    # Динамическая актуализация версии Docker API для Watchtower (Docker 28+/29+)
-    local RUNTIME_API_VER
-    RUNTIME_API_VER=$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || echo "${DETECTED_DOCKER_API:-1.45}")
-    [ -n "${RUNTIME_API_VER}" ] && DETECTED_DOCKER_API="${RUNTIME_API_VER}"
+    print_step_header "09/11" "ГЕНЕРАЦИЯ CADDYFILE И DOCKER-COMPOSE.YML"
+    
+    # Экранирование паролей для Compose и переменных окружения
+    local SAMBA_PASS_ESC
+    SAMBA_PASS_ESC=$(yaml_escape "${SAMBA_PASS}")
+    local SAMBA_PASS_COMPOSE="${SAMBA_PASS_ESC//\$/\$\$}"
+    # Убираем внешние кавычки, так как значение подставляется в строку кавычек Compose
+    SAMBA_PASS_COMPOSE="${SAMBA_PASS_COMPOSE%\"}"
+    SAMBA_PASS_COMPOSE="${SAMBA_PASS_COMPOSE#\"}"
 
     # Стандарты безопасности Caddy 2026: X-XSS-Protection "0" (актуальный OWASP), строгий HSTS
     cat <<EOF_CADDY > "${APP_DIR}/caddy/Caddyfile"
@@ -2315,12 +2894,12 @@ configure_caddy_and_compose() {
 
 (security_headers) {
     header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
         X-XSS-Protection "0"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Permissions-Policy "interest-cohort=(), camera=(), microphone=(), geolocation=()"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
     }
 }
 EOF_CADDY
@@ -2490,13 +3069,13 @@ EOF_COMPOSE
     restart: unless-stopped
     network_mode: host
     environment:
-      - SAMBA_CONF_WORKGROUP=WORKGROUP
-      - SAMBA_CONF_SERVER_STRING=Homelab Storage
-      - AVAHI_DISABLE=true
-      - WSDD2_DISABLE=false
-      - ACCOUNT_${ADMIN_USER_SAFE}=${SAMBA_PASS_COMPOSE}
-      - UID_${ADMIN_USER_SAFE}=${USER_UID}
-      - SAMBA_VOLUME_CONFIG_${SHARE_NAME}=[${SHARE_NAME}]; path=/shares/${SHARE_NAME}; valid users=${ADMIN_USER_SAFE}; force user=${ADMIN_USER_SAFE}; guest ok=no; read only=no; browseable=yes; create mask=0664; directory mask=0775
+      - "SAMBA_CONF_WORKGROUP=WORKGROUP"
+      - "SAMBA_CONF_SERVER_STRING=Homelab Storage"
+      - "AVAHI_DISABLE=true"
+      - "WSDD2_DISABLE=false"
+      - "ACCOUNT_${ADMIN_USER_SAFE}=${SAMBA_PASS_COMPOSE}"
+      - "UID_${ADMIN_USER_SAFE}=${USER_UID}"
+      - "SAMBA_VOLUME_CONFIG_${SHARE_NAME}=[${SHARE_NAME}]; path=/shares/${SHARE_NAME}; valid users=${ADMIN_USER_SAFE}; force user=${ADMIN_USER_SAFE}; guest ok=no; read only=no; browseable=yes; create mask=0664; directory mask=0775"
     volumes:
       - ${SAVE_DIR}:/shares/${SHARE_NAME}
 
@@ -2536,8 +3115,8 @@ EOF_COMPOSE
     container_name: vaultwarden
     restart: unless-stopped
     environment:
-      - DOMAIN=https://${VAULT_DOMAIN}
-      - ADMIN_TOKEN=${VAULT_ADMIN_HASH_ESCAPED}
+      - "DOMAIN=https://${VAULT_DOMAIN}"
+      - "ADMIN_TOKEN=${VAULT_ADMIN_HASH_ESCAPED}"
     volumes:
       - ${VAULT_DATA_DIR}:/data
 
@@ -2551,19 +3130,19 @@ EOF_COMPOSE
     container_name: gitea
     restart: unless-stopped
     environment:
-      - USER_UID=${USER_UID}
-      - USER_GID=${USER_GID}
-      - GITEA__database__DB_TYPE=sqlite3
-      - GITEA__database__PATH=/data/gitea/gitea.db
-      - GITEA__server__ROOT_URL=https://${GITEA_DOMAIN}/
-      - GITEA__server__DOMAIN=${GITEA_DOMAIN}
-      - GITEA__server__SSH_DOMAIN=${LOCAL_IP}
-      - GITEA__server__SSH_PORT=2222
-      - GITEA__server__SSH_LISTEN_PORT=22
-      - GITEA__server__LFS_START_SERVER=true
-      - GITEA__service__DISABLE_REGISTRATION=false
-      - GITEA__security__INSTALL_LOCK=true
-      - GITEA__security__PASSWORD_COMPLEXITY=off
+      - "USER_UID=${USER_UID}"
+      - "USER_GID=${USER_GID}"
+      - "GITEA__database__DB_TYPE=sqlite3"
+      - "GITEA__database__PATH=/data/gitea/gitea.db"
+      - "GITEA__server__ROOT_URL=https://${GITEA_DOMAIN}/"
+      - "GITEA__server__DOMAIN=${GITEA_DOMAIN}"
+      - "GITEA__server__SSH_DOMAIN=${LOCAL_IP}"
+      - "GITEA__server__SSH_PORT=2222"
+      - "GITEA__server__SSH_LISTEN_PORT=22"
+      - "GITEA__server__LFS_START_SERVER=true"
+      - "GITEA__service__DISABLE_REGISTRATION=false"
+      - "GITEA__security__INSTALL_LOCK=true"
+      - "GITEA__security__PASSWORD_COMPLEXITY=off"
     ports:
       - "2222:22"
     volumes:
@@ -2582,11 +3161,11 @@ EOF_COMPOSE
     container_name: qbittorrent
     restart: unless-stopped
     environment:
-      - PUID=${USER_UID}
-      - PGID=${USER_GID}
-      - TZ=Etc/UTC
-      - WEBUI_PORT=8080
-      - TORRENTING_PORT=6881
+      - "PUID=${USER_UID}"
+      - "PGID=${USER_GID}"
+      - "TZ=Etc/UTC"
+      - "WEBUI_PORT=8080"
+      - "TORRENTING_PORT=6881"
     ports:
       - "127.0.0.1:8080:8080"
       - "6881:6881"
@@ -2612,12 +3191,14 @@ EOF_COMPOSE
     ports:
       - "127.0.0.1:8081:8081"
     environment:
-      - UID=${USER_UID}
-      - GID=${USER_GID}
-      - ALLOW_PRIVATE_ADDRESSES=true
-      - DOWNLOAD_DIR=/downloads
-      - STATE_DIR=/downloads/.metube
-      - TEMP_DIR=/downloads/tmp
+      - "PUID=${USER_UID}"
+      - "PGID=${USER_GID}"
+      - "UID=${USER_UID}"
+      - "GID=${USER_GID}"
+      - "ALLOW_PRIVATE_ADDRESSES=true"
+      - "DOWNLOAD_DIR=/downloads"
+      - "STATE_DIR=/downloads/.metube"
+      - "TEMP_DIR=/downloads/tmp"
     volumes:
       - ${SAVE_DIR}/metube:/downloads
 
@@ -2638,7 +3219,7 @@ EOF_COMPOSE
       - "80:80"
       - "443:443"
     environment:
-      - DUCKDNS_API_TOKEN=${DUCKDNS_TOKEN}
+      - "DUCKDNS_API_TOKEN=${DUCKDNS_TOKEN}"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile
       - ./caddy/data:/data
@@ -2652,11 +3233,11 @@ EOF_COMPOSE
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - DOCKER_API_VERSION=${DETECTED_DOCKER_API:-1.45}
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=86400
-      - WATCHTOWER_INCLUDE_RESTARTING=true
-      - WATCHTOWER_TIMEOUT=30s
+      - "DOCKER_API_VERSION=${DETECTED_DOCKER_API:-1.45}"
+      - "WATCHTOWER_CLEANUP=true"
+      - "WATCHTOWER_POLL_INTERVAL=86400"
+      - "WATCHTOWER_INCLUDE_RESTARTING=true"
+      - "WATCHTOWER_TIMEOUT=30s"
 EOF_COMPOSE
 
     if [ "${INIT_SYSTEM}" = "systemd" ]; then
@@ -2729,10 +3310,10 @@ EOF_HOMELAB_RC
 }
 
 # =============================================================================
-# 9. РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТОМАТИЗАЦИЯ ПОСТ-УСТАНОВКИ
+# 10. РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТОМАТИЗАЦИЯ ПОСТ-УСТАНОВКИ
 # =============================================================================
 setup_backups_and_start() {
-    print_step_header "09/10" "РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТО-ИНИЦИАЛИЗАЦИЯ"
+    print_step_header "10/11" "РЕЗЕРВНОЕ КОПИРОВАНИЕ, СТАРТ И АВТО-ИНИЦИАЛИЗАЦИЯ"
 
     if [[ "${ENABLE_VAULT}" =~ ^[Yy]$ ]]; then
         log_info "Настройка автоматического горячего бэкапа Vaultwarden (SQLite3)..."
@@ -2754,7 +3335,11 @@ trap 'rm -rf "${TEMP_DIR}"' EXIT
 mkdir -p "${BACKUP_DIR}"
 
 if [ -f "${DB_SRC}" ]; then
-    sqlite3 "${DB_SRC}" ".backup '${TEMP_DIR}/db.sqlite3'"
+    # Атомарный горячий бэкап: сначала пробуем Python sqlite3.backup (100% надежность без внешних утилит)
+    if ! python3 -c "import sqlite3, sys; s = sqlite3.connect(sys.argv[1]); b = sqlite3.connect(sys.argv[2]); s.backup(b); b.close(); s.close()" "${DB_SRC}" "${TEMP_DIR}/db.sqlite3" 2>/dev/null; then
+        sqlite3 "${DB_SRC}" ".backup '${TEMP_DIR}/db.sqlite3'" 2>/dev/null || true
+    fi
+
     [ -d "${DATA_DIR}/attachments" ] && cp -r "${DATA_DIR}/attachments" "${TEMP_DIR}/"
     [ -d "${DATA_DIR}/sends" ] && cp -r "${DATA_DIR}/sends" "${TEMP_DIR}/"
     [ -f "${DATA_DIR}/rsa_key.pem" ] && cp -f "${DATA_DIR}/rsa_key.pem" "${TEMP_DIR}/"
@@ -2763,8 +3348,8 @@ if [ -f "${DB_SRC}" ]; then
     tar -czf "${BACKUP_DIR}/vaultwarden_backup_${DATE_TAG}.tar.gz" -C "${TEMP_DIR}" .
     chmod 600 "${BACKUP_DIR}/vaultwarden_backup_${DATE_TAG}.tar.gz" 2>/dev/null || true
     chmod 700 "${BACKUP_DIR}" 2>/dev/null || true
-    chown -R "${SAVED_TARGET_USER:-root}:" "${BACKUP_DIR}" 2>/dev/null || true
-    find "${BACKUP_DIR}" -type f -name "vaultwarden_backup_*.tar.gz" -mtime +14 -delete
+    chown -R "${SAVED_TARGET_USER:-root}:${USER_GID:-0}" "${BACKUP_DIR}" 2>/dev/null || true
+    find "${BACKUP_DIR}" -type f -name "vaultwarden_backup_*.tar.gz" -mtime +14 -delete 2>/dev/null || true
 fi
 EOF_BACKUP
         chmod 750 "${APP_DIR}/backup_vaultwarden.sh"
@@ -2823,11 +3408,10 @@ DUMP_NAME="gitea_backup_${DATE_TAG}.zip"
 mkdir -p "${BACKUP_DIR}"
 
 if docker inspect -f '{{.State.Status}}' gitea 2>/dev/null | grep -q "running"; then
-    # Нативный dump напрямую в примонтированный том /backup (без двойного копирования на диск)
-    docker exec -u "${USER_UID:-1000}:${USER_GID:-1000}" gitea gitea dump -f "/backup/${DUMP_NAME}" -c /data/gitea/conf/app.ini >/dev/null 2>&1 || \
-    docker exec -u git gitea gitea dump -f "/backup/${DUMP_NAME}" -c /data/gitea/conf/app.ini >/dev/null 2>&1 || true
+    docker exec -u "${USER_UID:-1000}:${USER_GID:-1000}" gitea gitea dump --tempdir /tmp -f "/backup/${DUMP_NAME}" -c /data/gitea/conf/app.ini >/dev/null 2>&1 || \
+    docker exec -u git gitea gitea dump --tempdir /tmp -f "/backup/${DUMP_NAME}" -c /data/gitea/conf/app.ini >/dev/null 2>&1 || true
 
-    chown -R "${SAVED_TARGET_USER:-root}:" "${BACKUP_DIR}" 2>/dev/null || true
+    chown -R "${SAVED_TARGET_USER:-root}:${USER_GID:-0}" "${BACKUP_DIR}" 2>/dev/null || true
     chmod 640 "${BACKUP_DIR}"/gitea_backup_*.zip 2>/dev/null || true
     chmod 750 "${BACKUP_DIR}" 2>/dev/null || true
     find "${BACKUP_DIR}" -type f -name "gitea_backup_*.zip" -mtime +14 -delete 2>/dev/null || true
@@ -2946,10 +3530,10 @@ for p in set(db_paths):
 }
 
 # =============================================================================
-# 10. АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И САМОПРОВЕРКА СИСТЕМЫ
+# 11. АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И САМОПРОВЕРКА СИСТЕМЫ
 # =============================================================================
 diagnose_and_verify_system() {
-    print_step_header "10/10" "АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА СЕРВИСОВ И СИСТЕМЫ"
+    print_step_header "11/11" "АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА СЕРВИСОВ И СИСТЕМЫ"
 
     local DIAG_LOG="/opt/homelab/diagnostic_report.log"
     local USER_HOME
@@ -2965,6 +3549,7 @@ diagnose_and_verify_system() {
 =============================================================================
 Дистрибутив:       ${PRETTY_NAME:-Linux} ($(uname -r))
 Init-система:      ${INIT_SYSTEM}
+Платформа:         ${SYSTEM_ARCH} (Аппаратный AES: $([ $HAS_HARDWARE_AES -eq 1 ] && echo "Да" || echo "Нет"))
 IP сервера:        ${LOCAL_IP}
 Шлюз:              ${ROUTER_GATEWAY}
 Интерфейс:         ${DEFAULT_IFACE}
@@ -3103,7 +3688,7 @@ EOF_SYS_INFO
 }
 
 # =============================================================================
-# 11. ФИНАЛЬНЫЙ ДАШБОРД И СВОДКА ДАННЫХ
+# 12. ФИНАЛЬНЫЙ ДАШБОРД И СВОДКА ДАННЫХ
 # =============================================================================
 show_summary_dashboard() {
     echo ""
@@ -3116,6 +3701,12 @@ show_summary_dashboard() {
         echo -e "  ${CLR_WHITE}• AdGuard Home (DNS & AdBlock):${CLR_RESET} ${CLR_CYAN}https://${ADGUARD_DOMAIN}${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Mihomo Smart Routing UI:${CLR_RESET}      ${CLR_CYAN}https://${PROXY_DOMAIN}${CLR_RESET}"
         echo -e "  ${CLR_WHITE}• Секрет панели управления:${CLR_RESET}     ${CLR_YELLOW}${MIHOMO_SECRET}${CLR_RESET}"
+        if [ -n "${SELECTED_DOH_1:-}" ]; then
+            echo -e "  ${CLR_WHITE}• Быстрый DoH (HTTPS):${CLR_RESET}          ${CLR_GREEN}${SELECTED_DOH_1}${CLR_RESET}"
+        fi
+        if [ -n "${SELECTED_DOT_1:-}" ]; then
+            echo -e "  ${CLR_WHITE}• Быстрый DoT (TLS):${CLR_RESET}            ${CLR_GREEN}${SELECTED_DOT_1}${CLR_RESET}"
+        fi
     else
         echo -e "  ${CLR_MUTED}• Прозрачный шлюз отключен в конфигурации${CLR_RESET}"
     fi
@@ -3202,6 +3793,7 @@ show_summary_dashboard() {
 main() {
     show_banner
     check_privileges
+    detect_hardware_capabilities
     detect_os
     load_previous_config
     sync_time
@@ -3212,6 +3804,7 @@ main() {
     setup_credentials
     setup_gateway_networking
     setup_directories
+    benchmark_dns_servers
     configure_gateway_services
     configure_caddy_and_compose
     setup_backups_and_start
